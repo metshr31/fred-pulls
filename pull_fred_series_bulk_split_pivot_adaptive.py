@@ -635,3 +635,4 @@ if not failed_df.empty:
     print(f"⚠️ {len(failed_df)} series failed (see 'Failed' sheet).")
 
 print(f"⏱️ Total runtime: {elapsed:.1f} seconds ({elapsed/60:.2f} minutes) | {datetime.timedelta(seconds=round(elapsed))}")
+

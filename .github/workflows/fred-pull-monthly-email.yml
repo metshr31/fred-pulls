@@ -1,4 +1,4 @@
-name: FRED monthly email (20th only)
+name: FRED monthly email (20th and 30th)
 
 on:
   schedule:

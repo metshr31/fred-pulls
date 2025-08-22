@@ -1,5 +1,5 @@
-# pull_fred_series_bulk_split_pivot_timed.py
-import os, time, re, datetime
+# pull_fred_series_bulk_split_pivot_adaptive.py
+import os, time, re, datetime, random
 import pandas as pd
 from fredapi import Fred
 
@@ -7,10 +7,14 @@ from fredapi import Fred
 t0 = time.time()
 
 # ------------------ CONFIG ------------------
-FRED_API_KEY = os.environ.get("FRED_API_KEY", "7cda795ec1e0152f37ff98ee7854a0ec")
 START_DATE   = "2016-01-01"
 BASE_YEAR    = 2019
 OUTPUT_XLSX  = "fred_series_2019base.xlsx"
+
+# ------------------ FRED API KEY (ENV ONLY) ------------------
+FRED_API_KEY = os.environ.get("FRED_API_KEY")
+if not FRED_API_KEY:
+    raise RuntimeError("FRED_API_KEY env var not set (define it in GitHub Secrets or your shell).")
 
 # ------------------ Adaptive Pacing ------------------
 MIN_PAUSE = 0.50       # fastest allowed per-call delay
@@ -629,4 +633,5 @@ elapsed = time.time() - t0
 print(f"✅ Attempted {len(final_map)} unique series; saved {long_df['series_id'].nunique()} series to {OUTPUT_XLSX}.")
 if not failed_df.empty:
     print(f"⚠️ {len(failed_df)} series failed (see 'Failed' sheet).")
+
 print(f"⏱️ Total runtime: {elapsed:.1f} seconds ({elapsed/60:.2f} minutes) | {datetime.timedelta(seconds=round(elapsed))}")

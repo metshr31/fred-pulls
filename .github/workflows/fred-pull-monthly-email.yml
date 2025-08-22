@@ -2,9 +2,13 @@ name: FRED monthly email (20th only)
 
 on:
   schedule:
-    # Run on the 20th of each month at 14:00 UTC (≈ 9/10am ET depending on DST)
+    # 20th of every month at 14:00 UTC (≈ 9/10am ET)
     - cron: "0 14 20 * *"
-  workflow_dispatch: {}  # allow manual test runs
+    # 30th of every month at 14:00 UTC
+    - cron: "0 14 30 * *"
+    # February has no 30th: also run on Feb 28 at 14:00 UTC
+    - cron: "0 14 28 2 *"
+  workflow_dispatch: {}  # keep manual runs for testing
 
 jobs:
   run-and-email:
@@ -42,16 +46,16 @@ jobs:
       - name: Email Excel result (Yahoo → ari.ashe@spglobal.com)
         uses: dawidd6/action-send-mail@v3
         with:
-          server: smtp.mail.yahoo.com
-          port: 465
-          secure: true
+          server_address: smtp.mail.yahoo.com
+          server_port: 465        # SSL port
+          secure: true            # use SSL (true for 465; false if you switch to 587/TLS)
           username: ${{ secrets.YAHOO_EMAIL }}
           password: ${{ secrets.YAHOO_APP_PASSWORD }}
           from: ${{ secrets.YAHOO_EMAIL }}
           to: ${{ secrets.TO_EMAIL }}
           subject: "FRED export – ${{ github.repository }} – run #${{ github.run_number }}"
           body: |
-            Attached is the monthly FRED export (scheduled for the 20th).
+            Attached is the FRED export.
             Repo: ${{ github.repository }}
             Run ID: ${{ github.run_id }}
             Commit: ${{ github.sha }}

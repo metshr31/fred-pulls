@@ -1,0 +1,58 @@
+name: FRED monthly email (20th only)
+
+on:
+  schedule:
+    # Run on the 20th of each month at 14:00 UTC (≈ 9/10am ET depending on DST)
+    - cron: "0 14 20 * *"
+  workflow_dispatch: {}  # allow manual test runs
+
+jobs:
+  run-and-email:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run FRED pull
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          python pull_fred_series_bulk_split_pivot_adaptive.py
+
+      - name: Upload Excel artifact (optional but handy)
+        uses: actions/upload-artifact@v4
+        with:
+          name: fred_series_${{ github.run_number }}
+          path: fred_series_2019base.xlsx
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Email Excel result (Yahoo → ari.ashe@spglobal.com)
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server: smtp.mail.yahoo.com
+          port: 465
+          secure: true
+          username: ${{ secrets.YAHOO_EMAIL }}
+          password: ${{ secrets.YAHOO_APP_PASSWORD }}
+          from: ${{ secrets.YAHOO_EMAIL }}
+          to: ${{ secrets.TO_EMAIL }}
+          subject: "FRED export – ${{ github.repository }} – run #${{ github.run_number }}"
+          body: |
+            Attached is the monthly FRED export (scheduled for the 20th).
+            Repo: ${{ github.repository }}
+            Run ID: ${{ github.run_id }}
+            Commit: ${{ github.sha }}
+          attachments: fred_series_2019base.xlsx

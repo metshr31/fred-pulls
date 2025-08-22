@@ -510,34 +510,41 @@ def clean_ids(multiline_text: str):
     return unique
 
 def polite_pause():
-    time.sleep(PAUSE_SECONDS_BETWEEN_CALLS + random.uniform(0, 0.15))  # tiny jitter
+    # Use adaptive pacer (no fixed constant)
+    pacer.sleep()
 
 def retry_call(func, *args, **kwargs):
     """
-    Retry with exponential backoff + jitter.
-    Explicitly handles 'Too Many Requests' / 429 by backing off harder.
+    Retries with exponential backoff + jitter.
+    Integrates with AdaptivePacer:
+      - on success: pacer.on_success()
+      - on 429/rate-limit: pacer.on_rate_limit() and exponential wait
     """
     last_err = None
     for attempt in range(1, MAX_RETRIES_PER_CALL + 1):
         try:
-            return func(*args, **kwargs)
+            result = func(*args, **kwargs)
+            pacer.on_success()
+            return result
         except Exception as e:
             last_err = e
             msg = str(e).lower()
+
             # Detect throttling
             if "too many requests" in msg or "429" in msg or "rate limit" in msg:
-                wait = RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)) + random.uniform(0, 1.0)
+                pacer.on_rate_limit()
+                wait = BASE_BACKOFF * (2 ** (attempt - 1)) + random.uniform(0, 1.0)
                 print(f"⚠️ Rate limit hit. Backing off {wait:.1f}s (attempt {attempt}/{MAX_RETRIES_PER_CALL})...")
                 time.sleep(wait)
             else:
                 if attempt < MAX_RETRIES_PER_CALL:
-                    wait = RETRY_BACKOFF_SECONDS * (attempt ** 1.3) + random.uniform(0, 0.5)
+                    wait = BASE_BACKOFF * (attempt ** 1.3) + random.uniform(0, 0.6)
                     print(f"⚠️ Error: {e}. Retrying in {wait:.1f}s (attempt {attempt}/{MAX_RETRIES_PER_CALL})...")
                     time.sleep(wait)
                 else:
                     break
     raise last_err
-
+    
 def get_series_info_safe(sid: str):
     try:
         info = retry_call(fred.get_series_info, sid)
@@ -635,4 +642,5 @@ if not failed_df.empty:
     print(f"⚠️ {len(failed_df)} series failed (see 'Failed' sheet).")
 
 print(f"⏱️ Total runtime: {elapsed:.1f} seconds ({elapsed/60:.2f} minutes) | {datetime.timedelta(seconds=round(elapsed))}")
+
 

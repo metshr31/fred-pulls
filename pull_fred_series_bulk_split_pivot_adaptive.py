@@ -84,8 +84,8 @@ SERIES = {
     "IPG326S":   "IP: Plastics & Rubber Products",
     "IPG327S":   "IP: Nonmetallic Mineral Products",
     "IPG3273S":  "IP: Cement & Concrete Products",
-    "IPG333N":   "IP: Machinery Manufacturing",
-    "IPG334N":   "IP: Computer & Electronic Products",
+    "IPG333S":   "IP: Machinery Manufacturing",
+    "IPG334S":   "IP: Computer & Electronic Products",
     "IPG335S":   "IP: Electrical Equipment, Appliances",
     "IPG3361T3S":"IP: Motor Vehicles & Parts (3361–3363)",
     "IPG3363S":  "IP: Motor Vehicle Parts",
@@ -94,7 +94,9 @@ SERIES = {
     "IPG332S":   "IP: Fabricated Metal Products",
     "IPG321S":   "IP: Wood Products",
     "IPN3311A2RS":"IP: Primary Metal Industries (Real)",
-    "IPG3311A2S":"IP: Primary Metal Industries",
+    "IPG3327S":  "IP: Screws Nuts Bolts",
+    "IPN3328S":  "IP: Coating and Engraving",
+    "IPN213111S":"Drilling Oil and Gas Wells", 
     "IPG313S":   "IP: Textile Mills",
     "IPG314S":   "IP: Textile Product Mills",
 
@@ -214,8 +216,8 @@ IPG325S
 IPG326S
 IPG327S
 IPG3273S
-IPG333N
-IPG334N
+IPG333S
+IPG334S
 IPG335S
 IPG3361T3S
 IPG3363S
@@ -224,7 +226,9 @@ IPG339N
 IPG332S
 IPG321S
 IPN3311A2RS
-IPG3311A2S
+IPN213111S
+IPG3327S
+IPN3328S
 IPG313S
 IPG314S
 
@@ -697,6 +701,7 @@ if not failed_df.empty:
     print(f"⚠️ {len(failed_df)} series failed (see 'Failed' sheet).")
 
 print(f"⏱️ Total runtime: {elapsed:.1f} seconds ({elapsed/60:.2f} minutes) | {datetime.timedelta(seconds=round(elapsed))}")
+
 
 
 

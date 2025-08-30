@@ -106,6 +106,8 @@ SERIES = {
     "PCU325412325412": "PPI Industry: Pharma Prep Mfg",
     "PCU325620325620": "PPI Industry: Toilet Prep Mfg",
     "PCU484121484121": "PPI Industry: General Freight Trucking, Long-Distance TL",
+    "PCU4841224841221":"PPI Industry: General Freight Trucking, Long-Distance LTL",
+    "PCU482111482111412":"PPI Industry: General Freight Trucking, Long-Distance Intermodal",
     "WPU057303":       "PPI Commodity: No. 2 Diesel Fuel",
     "PCU336120336120": "PPI Industry: Heavy Duty Truck Manufacturing",
     "WPU141302":       "PPI Commodity: Motor Vehicle Parts",
@@ -168,6 +170,8 @@ SERIES = {
 SERIES_IDS_RAW = """
 # === Core PPIs / Costs ===
 PCU484121484121
+PCU4841224841221
+PCU482111482111412
 WPU057303
 PCU336120336120
 WPU141302
@@ -701,6 +705,7 @@ if not failed_df.empty:
     print(f"⚠️ {len(failed_df)} series failed (see 'Failed' sheet).")
 
 print(f"⏱️ Total runtime: {elapsed:.1f} seconds ({elapsed/60:.2f} minutes) | {datetime.timedelta(seconds=round(elapsed))}")
+
 
 
 

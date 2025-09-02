@@ -114,7 +114,7 @@ SERIES = {
     "WPU02":           "PPI Commodity: Processed Foods & Feeds",
 
     # --- Retail / Wholesale / Inventories (Monthly only) ---
-    "RSAFS":        "Retail & Food Services Sales (SA)",
+    "RRSFS":        "Advance Real Retail and Food Services Sales CPI Adjusted",
     "RSNSR":        "Retail & Food Services (NSA)",
     "MRTSSM4541US": "Retail Sales: Nonstore Retailers (SA, Monthly) — e-commerce proxy",
     "RETAILIRSA":   "Retail Inventories/Sales Ratio (SA)",
@@ -705,6 +705,7 @@ if not failed_df.empty:
     print(f"⚠️ {len(failed_df)} series failed (see 'Failed' sheet).")
 
 print(f"⏱️ Total runtime: {elapsed:.1f} seconds ({elapsed/60:.2f} minutes) | {datetime.timedelta(seconds=round(elapsed))}")
+
 
 
 

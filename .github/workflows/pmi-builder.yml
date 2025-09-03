@@ -1,0 +1,82 @@
+name: Monthly PMI Builder
+
+on:
+  schedule:
+    - cron: "0 13 2,3 * *"   # 13:00 UTC on the 2nd and 3rd of each month
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONFAULTHANDLER: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Show Python & pip
+        run: |
+          python --version
+          pip --version
+
+      - name: Install deps (pmi_builder.py)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests
+
+      - name: Decide whether to run today
+        id: decide
+        run: |
+          # All times in UTC on GitHub runners
+          DAY="$(date -u +%d)"
+          DOW="$(date -u +%u)"   # 1=Mon ... 7=Sun
+          SHOULD=false
+
+          if [ "$DAY" = "02" ]; then
+            # Run if Tue–Sat => DOW = 2..6
+            if [ "$DOW" -ge 2 ] && [ "$DOW" -le 6 ]; then
+              SHOULD=true
+            fi
+          elif [ "$DAY" = "03" ]; then
+            # Run only if yesterday (the 2nd) was Sunday => today must be Monday (DOW=1)
+            if [ "$DOW" -eq 1 ]; then
+              SHOULD=true
+            fi
+          fi
+
+          echo "should_run=$SHOULD" | tee -a "$GITHUB_OUTPUT"
+          echo "Today (UTC): $(date -u)"
+          echo "DAY=$DAY DOW=$DOW → should_run=$SHOULD"
+
+      - name: Prepare outputs dir
+        if: steps.decide.outputs.should_run == 'true'
+        run: mkdir -p outputs
+
+      - name: Run PMI builder
+        if: steps.decide.outputs.should_run == 'true'
+        run: |
+          python pmi_builder.py --start 2016-01-01 --out outputs/pmi_levels_and_index.csv
+          echo "Output files:"
+          ls -lah outputs || true
+
+      - name: Upload artifact
+        if: steps.decide.outputs.should_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pmi-levels-and-index
+          path: outputs/pmi_levels_and_index.csv
+          if-no-files-found: error
+
+      - name: Skipped (not a run day)
+        if: steps.decide.outputs.should_run != 'true'
+        run: echo "Not a scheduled run day per rules; exiting cleanly."

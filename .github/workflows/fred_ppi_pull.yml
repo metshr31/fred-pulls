@@ -23,7 +23,16 @@ jobs:
       - name: Install deps (no requirements.txt)
         run: |
           python -m pip install --upgrade pip
-          pip install fredapi pandas openpyxl xlsxwriter
+          pip install \
+            numpy \
+            pandas \
+            python-dateutil \
+            scipy \
+            scikit-learn \
+            statsmodels \
+            fredapi \
+            XlsxWriter \
+            openpyxl
 
       - name: Run FRED pull (selected PPIs)
         env:

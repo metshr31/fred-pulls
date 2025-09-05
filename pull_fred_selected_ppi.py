@@ -13,38 +13,92 @@ FRED_API_KEY = os.environ.get("FRED_API_KEY")
 if not FRED_API_KEY:
     raise RuntimeError("FRED_API_KEY env var not set.")
 
-# ------------- SERIES (AS REQUESTED) -------------
-# Note: WPU066 was listed twice; kept once. MRTSSM4541USS is included exactly
-# as provided (FRED commonly uses MRTSSM4541US, so if 'USS' fails it will show in Failed).
-SERIES_IDS = [
-    "PCU4841214841212",
-    "PCU4841224841221",
-    "PCU482111482111412",
-    "PCU322211322211",
-    "PCU322212322212",
-    "PCU326160326160",
-    "WPU066",
-    "WPU072A",
-    "WPU09150301",
-    "PCU423423",
-    "PCU424424",
-    "WPU58B",
-    "MRTSSM4541USS",
-    "PCU311311",
-    "PCU3116131161",
-    "PCU332332",
-    "PCU333333",
-    "WPU101",
-    "PCU327320327320",
-    "PCU325325",
-    "WPU061",
-    "WPU062",
-    "WPU081",
-    "PCUOMFGOMFG",
-    "PCUARETTRARETTR",
-]
+# =======================
+# SERIES (grouped & commented, auto-cleaned below)
+# =======================
+SERIES_IDS_BLOCK = """
+# =========================
+# CORE FREIGHT SERVICE PPIs
+# =========================
+PCU4841214841212     # Truckload (TL) line-haul only
+PCU4841224841221     # LTL line-haul only
+PCU482111482111412   # Rail intermodal line-haul
+PCU4931249312        # Warehousing & storage (general)
 
-# ------------- ADAPTIVE PACER / RETRIES -------------
+# =========================
+# VAN / RETAIL / WHOLESALE
+# =========================
+PCU423423            # Merchant wholesalers, durable goods
+PCU424424            # Merchant wholesalers, nondurable goods
+PCU454110454110      # Electronic shopping & mail-order (e-commerce)
+PCUARETTRARETTR      # Retail trade (aggregate)
+PCU452910452910      # Warehouse clubs & supercenters
+PCU445110445110      # Supermarkets & grocery stores
+
+# ==============
+# PACKAGING PPIs
+# ==============
+PCU322211322211      # Corrugated boxes (industry)
+PCU322212322212      # Folding paperboard boxes (industry)
+PCU326160326160      # Plastic bottles (industry)
+WPU09150301          # Corrugated containers (commodity)
+WPU072A              # Plastic packaging products (commodity)
+WPU066               # Plastics & resins (commodity)
+
+# ===================
+# REEFER / COLD CHAIN
+# ===================
+PCU311311            # Food manufacturing (aggregate)
+PCU3116131161        # Animal slaughtering & meat processing
+PCU493120493120      # Refrigerated warehousing & storage
+PCU3115              # Dairy product manufacturing
+PCU3114              # Fruit & vegetable preserving
+PCU3119              # Other food manufacturing
+
+# ============================
+# INTERMODAL / INDUSTRIAL PPIs
+# ============================
+PCU325325            # Chemical manufacturing (industry)
+WPU061               # Industrial chemicals (commodity)
+WPU066               # Plastics & resins (commodity)  # dup safe
+PCU332332            # Fabricated metal product mfg
+PCU333333            # Machinery manufacturing
+WPU101               # Iron & steel products (commodity)
+PCU327320327320      # Ready-mix concrete
+PCU331110331110      # Iron & steel mills (industry)
+PCU327310327310      # Cement manufacturing
+PCUOMFGOMFG          # Total manufacturing (industry)
+
+# ======================
+# ENERGY / INPUTS (PPI)
+# ======================
+WPU057303            # Diesel fuel (commodity)
+WPU081               # Lumber & wood products (commodity)
+""".strip()
+
+def clean_series_ids(block: str) -> list[str]:
+    ids = []
+    for ln in block.splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        # Take the first token as the series ID
+        sid = ln.split()[0].upper()
+        ids.append(sid)
+    # Deduplicate but keep order
+    seen = set()
+    uniq = []
+    for sid in ids:
+        if sid not in seen:
+            seen.add(sid)
+            uniq.append(sid)
+    return uniq
+
+SERIES_IDS = clean_series_ids(SERIES_IDS_BLOCK)
+
+# =======================
+# Adaptive pacing / retries (friendly to FRED)
+# =======================
 MIN_PAUSE = 0.50
 MAX_PAUSE = 2.50
 STEP_UP_MULT = 1.5

@@ -11,6 +11,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.linear_model import RidgeCV, LinearRegression
 from sklearn.isotonic import IsotonicRegression
 from statsmodels.tsa.statespace.sarimax import SARIMAX
+from scipy.stats import pearsonr
 
 warnings.filterwarnings("ignore")
 
@@ -246,7 +247,6 @@ def monthly_index_add(idx_last: pd.Timestamp, months: int) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(out)
 
 def best_lag_table(y: pd.Series, X: pd.DataFrame, max_lag: int = 12, min_obs: int = 24) -> pd.DataFrame:
-    from scipy.stats import pearsonr
     rows = []
     for col in X.columns:
         x = X[col]
@@ -257,7 +257,7 @@ def best_lag_table(y: pd.Series, X: pd.DataFrame, max_lag: int = 12, min_obs: in
             if dfj.shape[0] < min_obs:
                 continue
             r, p = pearsonr(dfj.iloc[:,0], dfj.iloc[:,1])
-            if (best is None) or (abs(r) > abs(best["pearson"])):  # by |corr|
+            if (best is None) or (abs(r) > abs(best["pearson"])):
                 best = {"feature": col, "best_lag": lag, "pearson": r, "p_value": p, "n_obs": dfj.shape[0]}
         if best is not None:
             rows.append(best)
@@ -296,7 +296,6 @@ def forecast_exog_with_noise(model, last_date, horizon, resid_std, rng):
     try:
         base = model.get_forecast(steps=horizon).predicted_mean.values
     except Exception:
-        # fallback: flat
         try:
             last_val = float(model.model.endog[-1])
         except Exception:
@@ -326,150 +325,179 @@ def ridge_iterative_forecast(last_date: pd.Timestamp,
         y_tmp.loc[cur] = yhat
     return pd.Series([v for (_, v) in preds], index=[d for (d, _) in preds], name="ridge_fcst")
 
-# ------------------ Forecasting pipeline (in-memory, directly on pulled data)
-TARGET = "PCU4841214841212"
-if TARGET not in wide_idx.columns:
-    raise RuntimeError(f"Target '{TARGET}' not in pulled dataset. Check SERIES_IDS.")
+# ------------------ Forecasting pipeline (multi-target)
+NORTH_STARS = [
+    ("PCU4841214841212", "TL"),      # Truckload line-haul
+    ("PCU482111482111412", "IMDL"),  # Rail intermodal line-haul
+]
 
-y = wide_idx[TARGET].dropna()
-X_all = wide_idx.drop(columns=[TARGET]).copy()
+def _sheet(name: str) -> str:
+    return name[:31]
 
-# 1) Choose top-K exogs by |corr| with best lead 0..12
-lag_tbl = best_lag_table(y, X_all, max_lag=MAX_LAG_MONTHS, min_obs=24)
-top_exog = lag_tbl.head(TOP_K_EXOG)[["feature","best_lag"]].reset_index(drop=True)
+results = {}
 
-# 2) Deterministic (mean) exog forecast H+lag (ensures lagged exog exist in horizon)
-X_full = X_all.copy()
-for _, r in top_exog.iterrows():
-    feat, lag = r["feature"], int(r["best_lag"])
-    model, _ = fit_exog_model(X_all[feat].dropna())
-    # Forecast H+lag so that shifted values exist when we get to horizon
-    try:
-        base = model.get_forecast(steps=FORECAST_HORIZON + lag).predicted_mean
-        f_idx = monthly_index_add(X_all[feat].dropna().index[-1], FORECAST_HORIZON + lag)
-        base = pd.Series(base.values, index=f_idx)
-    except Exception:
-        last_val = X_all[feat].dropna().iloc[-1]
-        f_idx = monthly_index_add(X_all.index[-1], FORECAST_HORIZON + lag)
-        base = pd.Series([last_val]*(FORECAST_HORIZON + lag), index=f_idx)
-    for dt in base.index:
-        if dt not in X_full.index:
-            X_full.loc[dt] = np.nan
-    X_full.loc[base.index, feat] = base
+for TARGET, TSHORT in NORTH_STARS:
+    if TARGET not in wide_idx.columns:
+        raise RuntimeError(f"Target '{TARGET}' not in pulled dataset. Check SERIES_IDS.")
 
-full_idx = X_full.index.sort_values()
-X_exog_lagged_full = build_exog_matrix(top_exog, X_full, full_idx)
+    y = wide_idx[TARGET].dropna().copy()
+    X_all = wide_idx.drop(columns=[TARGET]).copy()
 
-# 3) Align train matrices
-df_train = pd.concat([y.rename("y"), X_exog_lagged_full], axis=1).dropna()
-y_train = df_train["y"]
-X_train_exog = df_train.drop(columns=["y"])
+    # 1) Choose top-K exogs by |corr| with best lead 0..MAX_LAG_MONTHS
+    lag_tbl = best_lag_table(y, X_all, max_lag=MAX_LAG_MONTHS, min_obs=24)
+    top_exog = lag_tbl.head(TOP_K_EXOG)[["feature","best_lag"]].reset_index(drop=True)
 
-# 4) Base learners
-# 4a) Ridge + AR
-XA = add_ar_terms(X_train_exog, y_train, p=AR_P)
-dfA = pd.concat([y_train.rename("y"), XA], axis=1).dropna()
-yA, XA = dfA["y"], dfA.drop(columns=["y"])
-ridge = Pipeline([("scaler", StandardScaler()), ("ridge", RidgeCV(alphas=np.logspace(-4,3,40)))])
-ridge.fit(XA, yA)
-ridge_fit = pd.Series(ridge.predict(XA), index=XA.index, name="ridge_fit")
-ridge_fcst = ridge_iterative_forecast(y.index[-1], FORECAST_HORIZON, ridge, X_exog_lagged_full, y, p=AR_P)
-
-# 4b) SARIMAX + exog
-sarimax = SARIMAX(endog=y_train, exog=X_train_exog.loc[y_train.index], order=(2,0,1), trend="c",
-                  enforce_stationarity=False, enforce_invertibility=False).fit(disp=False)
-sarimax_fit = sarimax.get_prediction(start=y_train.index[0], end=y_train.index[-1],
-                                     exog=X_train_exog.loc[y_train.index], dynamic=False).predicted_mean
-X_future_exog = X_exog_lagged_full.loc[ridge_fcst.index].copy().fillna(method="ffill").fillna(method="bfill")
-sarimax_fcst = sarimax.get_forecast(steps=len(X_future_exog), exog=X_future_exog).predicted_mean
-
-# 5) Linear stack trained on last CAL_WINDOW_MONTHS
-common_idx = ridge_fit.index.intersection(sarimax_fit.index).intersection(y.index)
-stack_df = pd.DataFrame({"actual": y.loc[common_idx], "ridge": ridge_fit.loc[common_idx], "sarimax": sarimax_fit.loc[common_idx]}).dropna()
-tail_idx = stack_df.tail(CAL_WINDOW_MONTHS).index
-stack_lin = LinearRegression().fit(stack_df.loc[tail_idx, ["ridge","sarimax"]], stack_df.loc[tail_idx, "actual"])
-stack_fit = pd.Series(stack_lin.predict(stack_df[["ridge","sarimax"]]), index=stack_df.index, name="stack_fit")
-
-# 6) Isotonic calibration on recent window ONLY (applied to recent fit + entire forecast)
-iso = IsotonicRegression(out_of_bounds="clip").fit(stack_fit.loc[tail_idx].values, stack_df.loc[tail_idx, "actual"].values)
-stack_fit_cal = stack_fit.copy()
-stack_fit_cal.loc[tail_idx] = iso.transform(stack_fit.loc[tail_idx].values)
-
-stack_future_in = pd.DataFrame({"ridge": ridge_fcst, "sarimax": sarimax_fcst}, index=ridge_fcst.index)
-stack_fcst = pd.Series(stack_lin.predict(stack_future_in), index=stack_future_in.index, name="stack_fcst")
-stack_fcst_cal = pd.Series(iso.transform(stack_fcst.values), index=stack_fcst.index, name="stack_fcst_cal")
-
-# 7) Confidence bands via Monte Carlo (propagate exog-forecast uncertainty)
-exog_models = {}
-for _, r in top_exog.iterrows():
-    feat = r["feature"]
-    model, resid_std = fit_exog_model(X_all[feat].dropna())
-    exog_models[feat] = {"model": model, "std": resid_std, "lag": int(r["best_lag"])}
-
-rng = np.random.default_rng(42)
-sim_paths = []
-for s in range(MC_SIMS):
-    X_full_sim = X_all.copy()
-    for feat, info in exog_models.items():
-        lag = info["lag"]; model = info["model"]; std = info["std"]
+    # 2) Deterministic exog forecast H+lag
+    X_full = X_all.copy()
+    for _, r in top_exog.iterrows():
+        feat, lag = r["feature"], int(r["best_lag"])
+        model, _ = fit_exog_model(X_all[feat].dropna())
         try:
-            last_obs_date = X_all[feat].dropna().index[-1]
+            base = model.get_forecast(steps=FORECAST_HORIZON + lag).predicted_mean
+            f_idx = monthly_index_add(X_all[feat].dropna().index[-1], FORECAST_HORIZON + lag)
+            base = pd.Series(base.values, index=f_idx)
         except Exception:
-            last_obs_date = wide_idx.index[-1]
-        f_series = forecast_exog_with_noise(model, last_obs_date, FORECAST_HORIZON + lag, std, rng)
-        for dt in f_series.index:
-            if dt not in X_full_sim.index:
-                X_full_sim.loc[dt] = np.nan
-        X_full_sim.loc[f_series.index, feat] = f_series
-    X_exog_lagged_sim = build_exog_matrix(top_exog, X_full_sim, X_full_sim.index.sort_values())
-    ridge_fcst_sim = ridge_iterative_forecast(y.index[-1], FORECAST_HORIZON, ridge, X_exog_lagged_sim, y, p=AR_P)
-    X_future_exog_sim = X_exog_lagged_sim.loc[ridge_fcst_sim.index].copy().fillna(method="ffill").fillna(method="bfill")
-    try:
-        sarimax_fcst_sim = sarimax.get_forecast(steps=len(X_future_exog_sim), exog=X_future_exog_sim).predicted_mean
-    except Exception:
-        sarimax_fcst_sim = pd.Series(np.repeat(sarimax_fcst.iloc[-1], len(X_future_exog_sim)), index=X_future_exog_sim.index)
-    stack_future_in_sim = pd.DataFrame({"ridge": ridge_fcst_sim, "sarimax": sarimax_fcst_sim}, index=ridge_fcst_sim.index)
-    stack_fcst_sim = pd.Series(stack_lin.predict(stack_future_in_sim), index=stack_future_in_sim.index)
-    stack_fcst_cal_sim = pd.Series(iso.transform(stack_fcst_sim.values), index=stack_fcst_sim.index)
-    sim_paths.append(stack_fcst_cal_sim.rename(f"sim_{s}"))
+            last_val = X_all[feat].dropna().iloc[-1]
+            f_idx = monthly_index_add(X_all.index[-1], FORECAST_HORIZON + lag)
+            base = pd.Series([last_val]*(FORECAST_HORIZON + lag), index=f_idx)
+        for dt in base.index:
+            if dt not in X_full.index:
+                X_full.loc[dt] = np.nan
+        X_full.loc[base.index, feat] = base
 
-sim_df = pd.concat(sim_paths, axis=1)
-q_df = sim_df.quantile([0.05,0.10,0.50,0.90,0.95], axis=1).T
-q_df.columns = ["forecast_p05","forecast_p10","forecast_p50","forecast_p90","forecast_p95"]
+    full_idx = X_full.index.sort_values()
+    X_exog_lagged_full = build_exog_matrix(top_exog, X_full, full_idx)
 
-# 8) Assemble tidy outputs
-hist = pd.DataFrame({"actual": y})
-recent_projected = pd.Series(np.nan, index=hist.index, name="projected_fit")
-recent_projected.loc[stack_fit_cal.index] = stack_fit_cal  # calibrated in-sample projection for recent window
+    # 3) Align train matrices
+    df_train = pd.concat([y.rename("y"), X_exog_lagged_full], axis=1).dropna()
+    y_train = df_train["y"]
+    X_train_exog = df_train.drop(columns=["y"])
 
-forecast_table = pd.concat([hist, recent_projected], axis=1)
-forecast_table = pd.concat([forecast_table, q_df], axis=1)
+    # 4a) Ridge + AR
+    XA = add_ar_terms(X_train_exog, y_train, p=AR_P)
+    dfA = pd.concat([y_train.rename("y"), XA], axis=1).dropna()
+    yA, XA = dfA["y"], dfA.drop(columns=["y"])
+    ridge = Pipeline([("scaler", StandardScaler()), ("ridge", RidgeCV(alphas=np.logspace(-4,3,40)))])
+    ridge.fit(XA, yA)
+    ridge_fit = pd.Series(ridge.predict(XA), index=XA.index, name="ridge_fit")
+    ridge_fcst = ridge_iterative_forecast(y.index[-1], FORECAST_HORIZON, ridge, X_exog_lagged_full, y, p=AR_P)
 
-# Most recent month summary
-last_month = y.index.max()
-most_recent_summary = {
-    "most_recent_month": str(last_month.date()),
-    "actual_most_recent": float(y.loc[last_month]),
-    "projected_most_recent": float(forecast_table.loc[last_month, "projected_fit"]) if pd.notna(forecast_table.loc[last_month, "projected_fit"]) else np.nan,
-}
+    # 4b) SARIMAX + exog
+    sarimax = SARIMAX(endog=y_train, exog=X_train_exog.loc[y_train.index], order=(2,0,1), trend="c",
+                      enforce_stationarity=False, enforce_invertibility=False).fit(disp=False)
+    sarimax_fit = sarimax.get_prediction(start=y_train.index[0], end=y_train.index[-1],
+                                         exog=X_train_exog.loc[y_train.index], dynamic=False).predicted_mean
+    X_future_exog = X_exog_lagged_full.loc[ridge_fcst.index].copy().fillna(method="ffill").fillna(method="bfill")
+    sarimax_fcst = sarimax.get_forecast(steps=len(X_future_exog), exog=X_future_exog).predicted_mean
 
-# Metadata / params
-stack_coeffs = {
-    "intercept": float(stack_lin.intercept_),
-    "ridge_coef": float(stack_lin.coef_[0]),
-    "sarimax_coef": float(stack_lin.coef_[1]),
-}
-pipeline_params = {
-    "horizon_months": FORECAST_HORIZON,
-    "top_k_exog": TOP_K_EXOG,
-    "max_lead_lag_months": MAX_LAG_MONTHS,
-    "ar_p": AR_P,
-    "cal_window_months": CAL_WINDOW_MONTHS,
-    "mc_sims": MC_SIMS,
-}
+    # 5) Linear stack trained on last CAL_WINDOW_MONTHS
+    common_idx = ridge_fit.index.intersection(sarimax_fit.index).intersection(y.index)
+    stack_df = pd.DataFrame({"actual": y.loc[common_idx],
+                             "ridge": ridge_fit.loc[common_idx],
+                             "sarimax": sarimax_fit.loc[common_idx]}).dropna()
+    tail_idx = stack_df.tail(CAL_WINDOW_MONTHS).index
+    stack_lin = LinearRegression().fit(stack_df.loc[tail_idx, ["ridge","sarimax"]],
+                                       stack_df.loc[tail_idx, "actual"])
+    stack_fit = pd.Series(stack_lin.predict(stack_df[["ridge","sarimax"]]),
+                          index=stack_df.index, name="stack_fit")
 
-top_exog_table = top_exog.copy()
-top_exog_table["abs_pearson_rank"] = np.arange(1, len(top_exog_table)+1)
+    # 6) Isotonic calibration on recent window ONLY
+    iso = IsotonicRegression(out_of_bounds="clip").fit(stack_fit.loc[tail_idx].values,
+                                                       stack_df.loc[tail_idx, "actual"].values)
+    stack_fit_cal = stack_fit.copy()
+    stack_fit_cal.loc[tail_idx] = iso.transform(stack_fit.loc[tail_idx].values)
+
+    stack_future_in = pd.DataFrame({"ridge": ridge_fcst, "sarimax": sarimax_fcst}, index=ridge_fcst.index)
+    stack_fcst = pd.Series(stack_lin.predict(stack_future_in), index=stack_future_in.index, name="stack_fcst")
+    stack_fcst_cal = pd.Series(iso.transform(stack_fcst.values), index=stack_fcst.index, name="stack_fcst_cal")
+
+    # 7) Confidence bands via Monte Carlo (propagate exog-forecast uncertainty)
+    exog_models = {}
+    for _, r in top_exog.iterrows():
+        feat = r["feature"]
+        model, resid_std = fit_exog_model(X_all[feat].dropna())
+        exog_models[feat] = {"model": model, "std": resid_std, "lag": int(r["best_lag"])}
+
+    rng = np.random.default_rng(42)
+    sim_paths = []
+    for s in range(MC_SIMS):
+        X_full_sim = X_all.copy()
+        for feat, info in exog_models.items():
+            lag = info["lag"]; model = info["model"]; std = info["std"]
+            try:
+                last_obs_date = X_all[feat].dropna().index[-1]
+            except Exception:
+                last_obs_date = wide_idx.index[-1]
+            f_series = forecast_exog_with_noise(model, last_obs_date, FORECAST_HORIZON + lag, std, rng)
+            for dt in f_series.index:
+                if dt not in X_full_sim.index:
+                    X_full_sim.loc[dt] = np.nan
+            X_full_sim.loc[f_series.index, feat] = f_series
+        X_exog_lagged_sim = build_exog_matrix(top_exog, X_full_sim, X_full_sim.index.sort_values())
+        ridge_fcst_sim = ridge_iterative_forecast(y.index[-1], FORECAST_HORIZON, ridge, X_exog_lagged_sim, y, p=AR_P)
+        X_future_exog_sim = X_exog_lagged_sim.loc[ridge_fcst_sim.index].copy().fillna(method="ffill").fillna(method="bfill")
+        try:
+            sarimax_fcst_sim = sarimax.get_forecast(steps=len(X_future_exog_sim), exog=X_future_exog_sim).predicted_mean
+        except Exception:
+            sarimax_fcst_sim = pd.Series(np.repeat(sarimax_fcst.iloc[-1], len(X_future_exog_sim)),
+                                         index=X_future_exog_sim.index)
+        stack_future_in_sim = pd.DataFrame({"ridge": ridge_fcst_sim, "sarimax": sarimax_fcst_sim},
+                                           index=ridge_fcst_sim.index)
+        stack_fcst_sim = pd.Series(stack_lin.predict(stack_future_in_sim), index=stack_future_in_sim.index)
+        stack_fcst_cal_sim = pd.Series(iso.transform(stack_fcst_sim.values), index=stack_fcst_sim.index)
+        sim_paths.append(stack_fcst_cal_sim.rename(f"sim_{s}"))
+
+    sim_df = pd.concat(sim_paths, axis=1)
+    q_df = sim_df.quantile([0.05,0.10,0.50,0.90,0.95], axis=1).T
+    q_df.columns = ["forecast_p05","forecast_p10","forecast_p50","forecast_p90","forecast_p95"]
+
+    # 8) Assemble tidy outputs
+    hist = pd.DataFrame({"actual": y})
+    recent_projected = pd.Series(np.nan, index=hist.index, name="projected_fit")
+    recent_projected.loc[stack_fit_cal.index] = stack_fit_cal
+
+    forecast_table = pd.concat([hist, recent_projected, q_df], axis=1)
+
+    last_month = y.index.max()
+    most_recent_summary = {
+        "most_recent_month": str(last_month.date()),
+        "actual_most_recent": float(y.loc[last_month]),
+        "projected_most_recent": float(forecast_table.loc[last_month, "projected_fit"])
+                                  if pd.notna(forecast_table.loc[last_month, "projected_fit"]) else np.nan,
+    }
+
+    stack_coeffs = {
+        "intercept": float(stack_lin.intercept_),
+        "ridge_coef": float(stack_lin.coef_[0]),
+        "sarimax_coef": float(stack_lin.coef_[1]),
+    }
+    pipeline_params = {
+        "horizon_months": FORECAST_HORIZON,
+        "top_k_exog": TOP_K_EXOG,
+        "max_lead_lag_months": MAX_LAG_MONTHS,
+        "ar_p": AR_P,
+        "cal_window_months": CAL_WINDOW_MONTHS,
+        "mc_sims": MC_SIMS,
+    }
+
+    top_exog_table = top_exog.copy()
+    top_exog_table["abs_pearson_rank"] = np.arange(1, len(top_exog_table)+1)
+
+    results[TSHORT] = {
+        "target": TARGET,
+        "forecast_table": forecast_table,
+        "most_recent_summary": most_recent_summary,
+        "stack_coeffs": stack_coeffs,
+        "pipeline_params": pipeline_params,
+        "top_exog_table": top_exog_table,
+    }
+
+    # Per-target CSVs
+    ft_csv = f"pcu_{TSHORT.lower()}_pipeline_output_with_bands.csv"
+    f12_csv = f"pcu_{TSHORT.lower()}_forecast_next{FORECAST_HORIZON}m.csv"
+    forecast_table.reset_index().rename(columns={"index":"date"}).to_csv(ft_csv, index=False)
+    forecast_table.loc[forecast_table.index > last_month].reset_index().rename(columns={"index":"date"}).to_csv(f12_csv, index=False)
+    print(f"✅ Wrote {ft_csv} and {f12_csv} for target {TARGET} ({TSHORT}).")
 
 # ------------------ WRITE EXCEL (all sheets)
 with pd.ExcelWriter(OUTPUT_XLSX, engine="xlsxwriter") as xw:
@@ -483,29 +511,35 @@ with pd.ExcelWriter(OUTPUT_XLSX, engine="xlsxwriter") as xw:
     for fam, fam_df in long_df.groupby("family"):
         fam_df.sort_values(["series_id","date"]).to_excel(xw, sheet_name=fam[:31], index=False)
 
-    # ---- Forecasting outputs
-    forecast_table.reset_index().rename(columns={"index":"date"}).to_excel(xw, sheet_name="Forecast_With_Bands", index=False)
+    # ---- Forecasting outputs (one set per north star)
+    def _sheet(name: str) -> str: return name[:31]
+    for TSHORT, pack in results.items():
+        TARGET = pack["target"]
+        forecast_table = pack["forecast_table"]
+        most_recent_summary = pack["most_recent_summary"]
+        stack_coeffs = pack["stack_coeffs"]
+        pipeline_params = pack["pipeline_params"]
+        top_exog_table = pack["top_exog_table"]
 
-    # Diagnostics / metadata sheets
-    pd.DataFrame([
-        {"key":"most_recent_month","value":most_recent_summary["most_recent_month"]},
-        {"key":"actual_most_recent","value":most_recent_summary["actual_most_recent"]},
-        {"key":"projected_most_recent","value":most_recent_summary["projected_most_recent"]},
-    ]).to_excel(xw, sheet_name="Most_Recent_Summary", index=False)
+        forecast_table.reset_index().rename(columns={"index":"date"}).to_excel(
+            xw, sheet_name=_sheet(f"Forecast_{TSHORT}"), index=False
+        )
+        pd.DataFrame([
+            {"key":"most_recent_month","value":most_recent_summary["most_recent_month"]},
+            {"key":"actual_most_recent","value":most_recent_summary["actual_most_recent"]},
+            {"key":"projected_most_recent","value":most_recent_summary["projected_most_recent"]},
+        ]).to_excel(xw, sheet_name=_sheet(f"Recent_{TSHORT}"), index=False)
 
-    pd.DataFrame(stack_coeffs, index=[0]).to_excel(xw, sheet_name="Stack_Coeffs", index=False)
-    pd.DataFrame(pipeline_params, index=[0]).to_excel(xw, sheet_name="Pipeline_Params", index=False)
-    top_exog_table.to_excel(xw, sheet_name="Top_Exog_Lags", index=False)
-
-# Also write handy CSVs
-forecast_table.reset_index().rename(columns={"index":"date"}).to_csv("pcu_pipeline_output_with_bands.csv", index=False)
-forecast_table.loc[forecast_table.index > last_month].reset_index().rename(columns={"index":"date"}).to_csv("pcu_forecast_next12m.csv", index=False)
+        pd.DataFrame(stack_coeffs, index=[0]).to_excel(xw, sheet_name=_sheet(f"Stack_{TSHORT}"), index=False)
+        pd.DataFrame(pipeline_params, index=[0]).to_excel(xw, sheet_name=_sheet(f"Params_{TSHORT}"), index=False)
+        top_exog_table.to_excel(xw, sheet_name=_sheet(f"TopExog_{TSHORT}"), index=False)
 
 print(f"✅ Saved {OUTPUT_XLSX} with {long_df['series_id'].nunique()} series.")
 if not failed_df.empty:
     print(f"⚠️ {len(failed_df)} series failed (see 'Failed' sheet).")
 
-print("✅ Wrote forecast tables:")
-print(" - pcu_pipeline_output_with_bands.csv (history + p50 + bands)")
-print(" - pcu_forecast_next12m.csv (forward 12 months only)")
-print("ℹ️  See Excel sheets: Forecast_With_Bands, Most_Recent_Summary, Stack_Coeffs, Pipeline_Params, Top_Exog_Lags.")
+print("✅ Wrote per-target forecast tables:")
+for TSHORT in results.keys():
+    print(f" - pcu_{TSHORT.lower()}_pipeline_output_with_bands.csv (history + p-bands)")
+    print(f" - pcu_{TSHORT.lower()}_forecast_next{FORECAST_HORIZON}m.csv (forward only)")
+print("ℹ️  See Excel sheets per target: Forecast_{TL/IMDL}, Recent_{TL/IMDL}, Stack_{TL/IMDL}, Params_{TL/IMDL}, TopExog_{TL/IMDL}.")

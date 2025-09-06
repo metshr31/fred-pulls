@@ -67,6 +67,10 @@ PCU424424            # Merchant wholesalers, nondurable goods
 PCUARETTRARETTR      # Retail trade (aggregate)
 PCU452910452910      # Warehouse clubs & supercenters
 PCU445110445110      # Supermarkets & grocery stores
+PCU444110444110      # Home centers (hardware, building materials; durables, TL-heavy)
+PCU448140448140      # Family clothing stores (apparel, often IMDL-driven through imports)
+PCU441110441110      # New car dealers (autos, big for TL, rail ramps)
+PCU447110447110      # Gasoline stations (nondurables, discretionary retail)
 
 # ==============
 # PACKAGING PPIs

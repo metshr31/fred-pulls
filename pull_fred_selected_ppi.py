@@ -64,7 +64,6 @@ PCU4931249312        # Warehousing & storage (general)
 # =========================
 PCU423423            # Merchant wholesalers, durable goods
 PCU424424            # Merchant wholesalers, nondurable goods
-PCU454110454110      # Electronic shopping & mail-order (e-commerce)
 PCUARETTRARETTR      # Retail trade (aggregate)
 PCU452910452910      # Warehouse clubs & supercenters
 PCU445110445110      # Supermarkets & grocery stores

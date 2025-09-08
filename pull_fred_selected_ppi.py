@@ -30,6 +30,7 @@ if not FRED_API_KEY:
     raise RuntimeError("FRED_API_KEY env var not set.")
 
 # ---------------- SERIES ----------------
+# (Updated IDs inline per your instructions)
 SERIES_IDS_BLOCK = """
 # =========================
 # CORE FREIGHT SERVICE PPIs
@@ -45,12 +46,12 @@ PCU4931249312        # Warehousing & storage (general)
 PCU423423            # Wholesalers durables
 PCU424424            # Wholesalers nondurables
 PCUARETTRARETTR      # Retail aggregate
-PCU452910452910      # Warehouse clubs
-PCU445110445110      # Supermarkets
-PCU444110444110      # Home centers (hardware, building materials; durables, TL-heavy)
-PCU448140448140      # Family clothing stores (apparel, often IMDL-driven through imports)
-PCU441110441110      # New car dealers (autos, big for TL, rail ramps)
-PCU447110447110      # Gasoline stations (nondurables, discretionary retail)
+PCU455210455210A     # Warehouse clubs & supercenters (current)
+PCU445110445110      # Supermarkets & grocery stores
+PCU444100444100      # Building materials & supplies dealers (home centers proxy)
+PCU448448            # Clothing & accessories retailers (family clothing replacement)
+PCU441110441110      # New car dealers
+PCU447110447110      # Gasoline stations
 
 # ==============
 # PACKAGING PPIs
@@ -58,19 +59,19 @@ PCU447110447110      # Gasoline stations (nondurables, discretionary retail)
 PCU322211322211      # Corrugated boxes
 PCU322212322212      # Folding paperboard
 PCU326160326160      # Plastic bottles
-WPU09150301          # Corrugated containers
-WPU072A              # Plastic packaging
-WPU066               # Plastics & resins
+WPU09150301          # Corrugated containers (commodity)
+WPU072A              # Plastic packaging (commodity)
+WPU066               # Plastics & resins (commodity)
 
 # ===================
 # REEFER / COLD CHAIN
 # ===================
-PCU311311            # Food manufacturing
+PCU311311            # Food manufacturing (aggregate)
 PCU3116131161        # Meat processing
 PCU493120493120      # Refrigerated warehousing
-PCU3115              # Dairy product manufacturing
-PCU3114              # Fruit & vegetable preserving
-PCU3119              # Other food manufacturing
+PCU31153115          # Dairy product manufacturing (updated)
+PCU311421311421      # Fruit & vegetable preserving (updated)
+PCU31193119          # Other food manufacturing (updated)
 
 # ============================
 # INTERMODAL / INDUSTRIAL PPIs
@@ -105,6 +106,30 @@ def clean_series_ids(block: str) -> list[str]:
 
 SERIES_IDS = clean_series_ids(SERIES_IDS_BLOCK)
 
+# ---------- Fix B: ID replacements / aliases ----------
+# (Also swap any legacy IDs if they still appear)
+ID_FIXUPS = {
+    # Retail/wholesale
+    "PCU452910452910": "PCU455210455210A",  # warehouse clubs & supercenters (legacy -> current)
+    "PCU448140448140": "PCU448448",         # family clothing -> clothing & accessories retailers
+    "PCU444110444110": "PCU444100444100",   # home centers -> building materials & supplies dealers
+
+    # Food aggregates
+    "PCU3115":         "PCU31153115",       # dairy product manufacturing
+    "PCU3114":         "PCU311421311421",   # fruit & vegetable preserving
+    "PCU3119":         "PCU31193119",       # other food manufacturing
+}
+def apply_id_fixups(series_ids):
+    fixed = []
+    for sid in series_ids:
+        new_sid = ID_FIXUPS.get(sid, sid)
+        if new_sid != sid:
+            print(f"[ID FIXUP] {sid} -> {new_sid}")
+        fixed.append(new_sid)
+    return fixed
+
+SERIES_IDS = apply_id_fixups(SERIES_IDS)
+
 # --------------- DATE HELPERS ---------------
 def to_month_start_index(dt_series) -> pd.DatetimeIndex:
     return pd.to_datetime(dt_series).to_period("M").to_timestamp("MS")
@@ -133,7 +158,7 @@ records, latest_rows, failed, meta_rows = [], [], [], []
 
 for i, sid in enumerate(SERIES_IDS, start=1):
     try:
-        # (optional) get title
+        # (optional) series title
         try:
             info = retry_call(fred.get_series_info, sid)
             meta_rows.append({"FRED_Code": sid, "Title": getattr(info, "title", sid)})
@@ -171,7 +196,13 @@ for i, sid in enumerate(SERIES_IDS, start=1):
 meta_df   = pd.DataFrame(meta_rows) if meta_rows else pd.DataFrame(columns=["FRED_Code","Title"])
 long_df   = (pd.concat(records, ignore_index=True).sort_values(["series_id","date"])
              if records else pd.DataFrame(columns=["date","value","index_2019=100","series_id","series_label"]))
-latest_df = pd.DataFrame(latest_rows).sort_values("Latest Available", ascending=False)
+
+# ---------- Fix A: guard latest_df (prevent KeyError when none succeeded)
+latest_df = (
+    pd.DataFrame(latest_rows).sort_values("Latest Available", ascending=False)
+    if latest_rows else
+    pd.DataFrame(columns=["FRED_Code", "Latest Available"])
+)
 failed_df = pd.DataFrame(failed).sort_values("FRED_Code") if failed else pd.DataFrame(columns=["FRED_Code","Reason"])
 
 wide_idx = long_df.pivot_table(index="date", columns="series_id", values="index_2019=100", aggfunc="last").sort_index()
@@ -196,7 +227,12 @@ def best_lag_table(y: pd.Series, X: pd.DataFrame, max_lag: int = 12) -> pd.DataF
             dfj = pd.concat([y, xs], axis=1).dropna()
             if dfj.empty:
                 continue
-            r, _ = pearsonr(dfj.iloc[:, 0], dfj.iloc[:, 1])
+            try:
+                r, _ = pearsonr(dfj.iloc[:, 0], dfj.iloc[:, 1])
+            except Exception:
+                continue
+            if not np.isfinite(r):
+                continue
             if best is None or abs(r) > abs(best["pearson"]):
                 best = {"feature": col, "best_lag": lag, "pearson": r}
         if best:
@@ -390,7 +426,7 @@ with pd.ExcelWriter(OUTPUT_XLSX, engine="xlsxwriter") as xw:
     long_df.to_excel(xw, sheet_name="Series_Long", index=False)
     wide_idx.to_excel(xw, sheet_name="Wide_Index2019")
     meta_df.to_excel(xw, sheet_name="Metadata", index=False)
-    # Optional diagnostics:
+    # Diagnostics
     if not failed_df.empty:
         failed_df.to_excel(xw, sheet_name="Failed", index=False)
     if not latest_df.empty:

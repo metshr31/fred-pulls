@@ -131,24 +131,24 @@ def apply_id_fixups(series_ids):
 SERIES_IDS = apply_id_fixups(SERIES_IDS)
 
 # --------------- DATE HELPERS ---------------
-def to_month_start_index(dt_like) -> pd.DatetimeIndex | pd.Series:
+def to_month_start_index(dt_like):
     """
-    Normalize datetimes to Month-Start (MS).
-    Works for Series, DatetimeIndex, list/array-like, or scalar.
+    Normalize to month-start timestamps safely (no 'MS' as a Period freq).
+    Works for Series, DatetimeIndex, array-like, or scalar.
     """
     dt = pd.to_datetime(dt_like)
 
-    # If it's a Series, use the .dt accessor
+    # Series → use .dt accessors then take start_time of monthly period
     if isinstance(dt, pd.Series):
-        return dt.dt.to_period("M").dt.to_timestamp("MS")
+        return dt.dt.to_period("M").dt.start_time
 
-    # Otherwise treat as an index/array-like
-    try:
-        # DatetimeIndex has .to_period
-        return pd.DatetimeIndex(dt).to_period("M").to_timestamp("MS")
-    except Exception:
-        # Fallback for odd inputs
-        return pd.to_datetime(dt).astype("datetime64[M]").astype("datetime64[ns]")
+    # DatetimeIndex → convert to PeriodIndex('M') then start of month
+    if isinstance(dt, pd.DatetimeIndex):
+        return dt.to_period("M").to_timestamp(how="start")
+
+    # Fallback: coerce to Index first
+    idx = pd.to_datetime(pd.Index(dt))
+    return idx.to_period("M").to_timestamp(how="start")
 
 # --------------- RETRY (surface real error) ---------------
 def retry_call(func, *args, **kwargs):
@@ -169,7 +169,7 @@ try:
 except Exception as e:
     raise RuntimeError(f"FRED probe failed: {e}. Check FRED_API_KEY & network.") from e
 
-# ---------------- DATA PULL (robust, MS index, failure summary) ----------------
+# ---------------- DATA PULL (robust, month-start index, failure summary) ----------------
 records, latest_rows, failed, meta_rows = [], [], [], []
 
 for i, sid in enumerate(SERIES_IDS, start=1):
@@ -188,7 +188,7 @@ for i, sid in enumerate(SERIES_IDS, start=1):
             continue
 
         df = s.to_frame("value").reset_index().rename(columns={"index": "date"})
-        df["date"] = to_month_start_index(df["date"])  # normalize to MS
+        df["date"] = to_month_start_index(df["date"])  # normalize to month-start
 
         base = df.loc[df["date"].dt.year == BASE_YEAR, "value"].mean()
         df["index_2019=100"] = (df["value"] / base) * 100.0 if pd.notna(base) and base != 0 else pd.NA
@@ -225,7 +225,8 @@ wide_idx = long_df.pivot_table(index="date", columns="series_id", values="index_
 
 if long_df.empty:
     print("\n[ERROR] No series pulled. Summary of failures:")
-    print(failed_df.head(20).to_string(index=False))
+    if not failed_df.empty:
+        print(failed_df.head(20).to_string(index=False))
     raise RuntimeError("No series pulled from FRED. See failure summary above.")
 
 print(f"\n[OK] Pulled {len(records)} / {len(SERIES_IDS)} series.")
@@ -277,7 +278,7 @@ def extend_exog_yoy(X_lagged: pd.DataFrame, last_obs: pd.Timestamp, horizon: int
     if X_lagged.empty:
         return X_lagged
     X = X_lagged.copy().sort_index()
-    future_idx = pd.date_range(last_obs + relativedelta(months=1), periods=horizon, freq="MS")
+    future_idx = pd.date_range(last_obs + relativedelta(months=1), periods=horizon, freq="MS")  # DatetimeIndex freq is fine
     X = X.reindex(X.index.union(future_idx)).sort_index()
     for dt in future_idx:
         src = dt - relativedelta(years=1)
@@ -294,7 +295,7 @@ def ridge_iterative_forecast(last_date: pd.Timestamp,
                              p: int = 6) -> pd.Series:
     preds = []
     y_tmp = y_hist.copy()
-    future_idx = pd.date_range(last_date + relativedelta(months=1), periods=horizon, freq="MS")
+    future_idx = pd.date_range(last_date + relativedelta(months=1), periods=horizon, freq="MS")  # DatetimeIndex
     X_filled = X_exog_lagged_full.copy()
     for cur in future_idx:
         row = {c: X_filled.loc[cur, c] for c in X_filled.columns}
@@ -316,8 +317,8 @@ NORTH_STARS = [
 
 results = {}
 
-# Normalize to MS (safety)
-wide_idx.index = wide_idx.index.to_period("M").to_timestamp("MS")
+# Normalize to month-start (safety)
+wide_idx.index = to_month_start_index(wide_idx.index)
 wide_idx = wide_idx.sort_index()
 
 for TARGET, TSHORT in NORTH_STARS:
@@ -325,7 +326,7 @@ for TARGET, TSHORT in NORTH_STARS:
         continue
 
     y = wide_idx[TARGET].dropna()
-    y.index = y.index.to_period("M").to_timestamp("MS")
+    y.index = to_month_start_index(y.index)
     X_all = wide_idx.drop(columns=[TARGET]).copy()
 
     lag_tbl  = best_lag_table(y, X_all, MAX_LAG_MONTHS)

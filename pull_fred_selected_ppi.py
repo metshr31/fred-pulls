@@ -131,8 +131,24 @@ def apply_id_fixups(series_ids):
 SERIES_IDS = apply_id_fixups(SERIES_IDS)
 
 # --------------- DATE HELPERS ---------------
-def to_month_start_index(dt_series) -> pd.DatetimeIndex:
-    return pd.to_datetime(dt_series).to_period("M").to_timestamp("MS")
+def to_month_start_index(dt_like) -> pd.DatetimeIndex | pd.Series:
+    """
+    Normalize datetimes to Month-Start (MS).
+    Works for Series, DatetimeIndex, list/array-like, or scalar.
+    """
+    dt = pd.to_datetime(dt_like)
+
+    # If it's a Series, use the .dt accessor
+    if isinstance(dt, pd.Series):
+        return dt.dt.to_period("M").dt.to_timestamp("MS")
+
+    # Otherwise treat as an index/array-like
+    try:
+        # DatetimeIndex has .to_period
+        return pd.DatetimeIndex(dt).to_period("M").to_timestamp("MS")
+    except Exception:
+        # Fallback for odd inputs
+        return pd.to_datetime(dt).astype("datetime64[M]").astype("datetime64[ns]")
 
 # --------------- RETRY (surface real error) ---------------
 def retry_call(func, *args, **kwargs):

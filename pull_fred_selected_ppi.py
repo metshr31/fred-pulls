@@ -1,5 +1,5 @@
 # pull_fred_selected_ppi.py
-import os, time, re, random, warnings
+import os, time, random, warnings
 import pandas as pd
 import numpy as np
 from fredapi import Fred
@@ -106,82 +106,91 @@ def clean_series_ids(block: str) -> list[str]:
 SERIES_IDS = clean_series_ids(SERIES_IDS_BLOCK)
 
 # --------------- DATE HELPERS ---------------
-def to_month_start_index(dt_series: pd.Series) -> pd.DatetimeIndex:
-    """Normalize any datetime index/series to Month-Start (MS)."""
-    # Convert to Period[M], then to timestamp at start of month
+def to_month_start_index(dt_series) -> pd.DatetimeIndex:
     return pd.to_datetime(dt_series).to_period("M").to_timestamp("MS")
 
-def month_range(start_dt: pd.Timestamp, periods: int) -> pd.DatetimeIndex:
-    return pd.date_range(start_dt, periods=periods, freq="MS")
-
-# ---------------- ADAPTIVE PACER ----------------
-class AdaptivePacer:
-    def __init__(self, pause=0.5):
-        self.pause = pause
-        self.successes = 0
-        self.calls = 0
-    def sleep(self):
-        time.sleep(self.pause + random.uniform(0,0.12))
-    def on_success(self): self.successes += 1
-
+# --------------- RETRY (surface real error) ---------------
 def retry_call(func, *args, **kwargs):
+    last = None
     for attempt in range(6):
         try:
             return func(*args, **kwargs)
-        except Exception:
-            time.sleep(2.0 * (2**attempt) + random.uniform(0,1.0))
-    raise
+        except Exception as e:
+            last = e
+            time.sleep(2.0 * (2**attempt) + random.uniform(0, 1.0))
+    raise last
 
+# ---------------- PRE-FLIGHT (auth/connectivity) ----------------
 fred = Fred(api_key=FRED_API_KEY)
+try:
+    _probe = fred.get_series("CPIAUCSL", observation_start="2019-01-01")
+    assert _probe is not None and len(_probe) > 0
+except Exception as e:
+    raise RuntimeError(f"FRED probe failed: {e}. Check FRED_API_KEY & network.") from e
 
-# ---------------- DATA PULL ----------------
-meta_rows, records = [], []
-for sid in SERIES_IDS:
+# ---------------- DATA PULL (robust, MS index, failure summary) ----------------
+records, latest_rows, failed, meta_rows = [], [], [], []
+
+for i, sid in enumerate(SERIES_IDS, start=1):
     try:
-        info = retry_call(fred.get_series_info, sid)
-        meta_rows.append({"FRED_Code": sid, "Title": getattr(info, "title", sid)})
+        # (optional) get title
+        try:
+            info = retry_call(fred.get_series_info, sid)
+            meta_rows.append({"FRED_Code": sid, "Title": getattr(info, "title", sid)})
+        except Exception as me:
+            meta_rows.append({"FRED_Code": sid, "Title": sid})
+            print(f"[META WARN] {sid}: {type(me).__name__}: {me}")
 
         s = retry_call(fred.get_series, sid, observation_start=START_DATE)
         if s is None or len(s) == 0:
+            failed.append({"FRED_Code": sid, "Reason": "Empty or None from FRED"})
             continue
 
         df = s.to_frame("value").reset_index().rename(columns={"index": "date"})
-        # Normalize to Month-Start
-        df["date"] = to_month_start_index(df["date"])
+        df["date"] = to_month_start_index(df["date"])  # normalize to MS
 
-        # 2019 base index
         base = df.loc[df["date"].dt.year == BASE_YEAR, "value"].mean()
-        if pd.notna(base) and base != 0:
-            df["index_2019=100"] = (df["value"] / base) * 100.0
-        else:
-            df["index_2019=100"] = np.nan
-
+        df["index_2019=100"] = (df["value"] / base) * 100.0 if pd.notna(base) and base != 0 else pd.NA
         df["series_id"] = sid
+
+        # optional label
+        title = next((m["Title"] for m in meta_rows if m["FRED_Code"] == sid), sid)
+        df["series_label"] = title
+
         records.append(df)
-    except Exception:
-        # Skip series that fail (rare)
-        continue
+        latest_rows.append({"FRED_Code": sid, "Latest Available": df["date"].max()})
 
-meta_df = pd.DataFrame(meta_rows)
-if not records:
-    raise RuntimeError("No series pulled from FRED.")
+        if i % 10 == 0:
+            print(f"...pulled {i}/{len(SERIES_IDS)} series")
 
-long_df = (
-    pd.concat(records, ignore_index=True)
-    .sort_values(["series_id", "date"])
-)
+    except Exception as e:
+        failed.append({"FRED_Code": sid, "Reason": f"{type(e).__name__}: {e}"})
+    finally:
+        time.sleep(0.15)  # gentle pacing
 
-wide_idx = (
-    long_df.pivot(index="date", columns="series_id", values="index_2019=100")
-    .sort_index()
-)
+meta_df   = pd.DataFrame(meta_rows) if meta_rows else pd.DataFrame(columns=["FRED_Code","Title"])
+long_df   = (pd.concat(records, ignore_index=True).sort_values(["series_id","date"])
+             if records else pd.DataFrame(columns=["date","value","index_2019=100","series_id","series_label"]))
+latest_df = pd.DataFrame(latest_rows).sort_values("Latest Available", ascending=False)
+failed_df = pd.DataFrame(failed).sort_values("FRED_Code") if failed else pd.DataFrame(columns=["FRED_Code","Reason"])
 
-# ---------------- FEATURES / UTILS ----------------
+wide_idx = long_df.pivot_table(index="date", columns="series_id", values="index_2019=100", aggfunc="last").sort_index()
+
+if long_df.empty:
+    print("\n[ERROR] No series pulled. Summary of failures:")
+    print(failed_df.head(20).to_string(index=False))
+    raise RuntimeError("No series pulled from FRED. See failure summary above.")
+
+print(f"\n[OK] Pulled {len(records)} / {len(SERIES_IDS)} series.")
+if not failed_df.empty:
+    print(f"[WARN] {len(failed_df)} series failed. Top examples:")
+    print(failed_df.head(10).to_string(index=False))
+
+# ---------------- FEATURE HELPERS ----------------
 def best_lag_table(y: pd.Series, X: pd.DataFrame, max_lag: int = 12) -> pd.DataFrame:
     rows = []
     for col in X.columns:
         best = None
-        # include lag 0..max_lag
         for lag in range(max_lag + 1):
             xs = X[col].shift(lag)
             dfj = pd.concat([y, xs], axis=1).dropna()
@@ -212,27 +221,16 @@ def add_ar_terms(X: pd.DataFrame, y: pd.Series, p: int = 6) -> pd.DataFrame:
     return out
 
 def extend_exog_yoy(X_lagged: pd.DataFrame, last_obs: pd.Timestamp, horizon: int) -> pd.DataFrame:
-    """
-    Ensure exogenous (already lagged) has future rows.
-    Fill each future month by copying the same month from the prior year (YoY repeat).
-    Fallback to forward/back fill if last year's month is not available.
-    """
+    """Append future months and fill each by YoY repeat; fallback to ffill/bfill."""
     if X_lagged.empty:
         return X_lagged
-
-    # All indices should be MS
     X = X_lagged.copy().sort_index()
     future_idx = pd.date_range(last_obs + relativedelta(months=1), periods=horizon, freq="MS")
-
-    # reindex to include future months
     X = X.reindex(X.index.union(future_idx)).sort_index()
-
     for dt in future_idx:
         src = dt - relativedelta(years=1)
         if src in X.index:
             X.loc[dt, X.columns] = X.loc[src, X.columns]
-        # else leave NaNs; we'll ffill/bfill below
-
     X = X.ffill().bfill()
     return X
 
@@ -242,37 +240,19 @@ def ridge_iterative_forecast(last_date: pd.Timestamp,
                              X_exog_lagged_full: pd.DataFrame,
                              y_hist: pd.Series,
                              p: int = 6) -> pd.Series:
-    """
-    Iteratively forecast with Ridge + AR terms.
-    Assumes X_exog_lagged_full already contains the columns the model saw during training (except AR terms),
-    and is extended to include future months (via extend_exog_yoy).
-    """
     preds = []
     y_tmp = y_hist.copy()
-    # Build future index (MS)
     future_idx = pd.date_range(last_date + relativedelta(months=1), periods=horizon, freq="MS")
-
-    # Ensure exog contains the future months (already YoY-extended by caller)
     X_filled = X_exog_lagged_full.copy()
-
     for cur in future_idx:
-        # Start with exogenous features for this month
         row = {c: X_filled.loc[cur, c] for c in X_filled.columns}
-
-        # Add AR lags from y_tmp (already has actual+forecast so far)
         for L in range(1, p + 1):
             lag_dt = cur - relativedelta(months=L)
-            if lag_dt in y_tmp.index:
-                row[f"y_lag{L}"] = y_tmp.loc[lag_dt]
-            else:
-                row[f"y_lag{L}"] = y_tmp.iloc[-1]
-
+            row[f"y_lag{L}"] = y_tmp.loc[lag_dt] if lag_dt in y_tmp.index else y_tmp.iloc[-1]
         xrow = pd.DataFrame([row], index=[cur])
-        # Predict and append
         yhat = float(model.predict(xrow)[0])
         preds.append((cur, yhat))
         y_tmp.loc[cur] = yhat
-
     return pd.Series([v for _, v in preds], index=[d for d, _ in preds], name="ridge_forecast")
 
 # ---------------- FORECAST PIPELINE ----------------
@@ -284,7 +264,7 @@ NORTH_STARS = [
 
 results = {}
 
-# Normalize wide_idx to MS (safety if upstream changes)
+# Normalize to MS (safety)
 wide_idx.index = wide_idx.index.to_period("M").to_timestamp("MS")
 wide_idx = wide_idx.sort_index()
 
@@ -292,33 +272,26 @@ for TARGET, TSHORT in NORTH_STARS:
     if TARGET not in wide_idx.columns:
         continue
 
-    # Target and exog
     y = wide_idx[TARGET].dropna()
     y.index = y.index.to_period("M").to_timestamp("MS")
     X_all = wide_idx.drop(columns=[TARGET]).copy()
 
-    # Top exogenous by lagged Pearson
     lag_tbl  = best_lag_table(y, X_all, MAX_LAG_MONTHS)
     top_exog = lag_tbl.head(TOP_K_EXOG)[["feature", "best_lag"]].reset_index(drop=True)
 
-    # Build lagged exogenous on the full index we have today
     X_exog_lagged = build_exog_matrix(top_exog, X_all, X_all.index)
 
-    # Training alignment (drop rows with any NaNs after lags)
     df_train = pd.concat([y.rename("y"), X_exog_lagged], axis=1).dropna()
     if df_train.empty or df_train.shape[0] < (AR_P + 24):
-        # Skip if too short to fit
         continue
 
     y_train = df_train["y"]
     X_train_exog = df_train.drop(columns=["y"])
 
-    # Add AR terms to training design
     XA = add_ar_terms(X_train_exog, y_train, AR_P)
     dfA = pd.concat([y_train.rename("y"), XA], axis=1).dropna()
     yA, XA = dfA["y"], dfA.drop(columns=["y"])
 
-    # Ridge model
     ridge = Pipeline([
         ("scaler", StandardScaler()),
         ("ridge",  RidgeCV(alphas=np.logspace(-4, 3, 40)))
@@ -326,14 +299,10 @@ for TARGET, TSHORT in NORTH_STARS:
     ridge.fit(XA, yA)
     ridge_fit = pd.Series(ridge.predict(XA), index=XA.index, name="ridge_fit")
 
-    # Build YoY-extended exog for the forecast period (EXOG without AR terms)
     last_date = y.index[-1]
     X_exog_yoy = extend_exog_yoy(X_exog_lagged, last_date, FORECAST_HORIZON)
-
-    # Ridge forecast (iterative with AR terms added inside the loop)
     ridge_fcst = ridge_iterative_forecast(last_date, FORECAST_HORIZON, ridge, X_exog_yoy, y, AR_P)
 
-    # SARIMAX (uses exog without AR terms)
     try:
         sarimax = SARIMAX(
             y_train,
@@ -351,15 +320,12 @@ for TARGET, TSHORT in NORTH_STARS:
             dynamic=False
         ).predicted_mean
 
-        # Future exog for SARIMAX (YoY-extended)
         X_future_exog = X_exog_yoy.loc[ridge_fcst.index]
         sarimax_fcst  = sarimax.get_forecast(steps=len(X_future_exog), exog=X_future_exog).predicted_mean
     except Exception:
-        # Fallback: if SARIMAX fails, use ridge only
-        sarimax_fit = ridge_fit.reindex_like(ridge_fit)
+        sarimax_fit  = ridge_fit.reindex_like(ridge_fit)
         sarimax_fcst = ridge_fcst.copy()
 
-    # --- Stacking & calibration ---
     common_idx = ridge_fit.index.intersection(sarimax_fit.index).intersection(y.index)
     stack_df = pd.DataFrame({
         "actual": y.loc[common_idx],
@@ -367,37 +333,30 @@ for TARGET, TSHORT in NORTH_STARS:
         "sarimax": sarimax_fit.loc[common_idx],
     }).dropna()
 
-    # If too short, skip stacking (rare)
     if stack_df.shape[0] < max(12, CAL_WINDOW_MONTHS):
-        stack_future_in = pd.DataFrame({"ridge": ridge_fcst, "sarimax": sarimax_fcst}, index=ridge_fcst.index)
-        stack_fcst = pd.Series(ridge_fcst, index=ridge_fcst.index) * 0.5 + pd.Series(sarimax_fcst, index=ridge_fcst.index) * 0.5
-        stack_fit_cal = pd.Series((ridge_fit + sarimax_fit) / 2.0).reindex(y.index).dropna()
+        stack_fit_cal = ((ridge_fit + sarimax_fit) / 2.0).reindex(y.index).dropna()
+        stack_fcst = (ridge_fcst * 0.5 + sarimax_fcst * 0.5).astype(float)
     else:
         tail_idx = stack_df.tail(CAL_WINDOW_MONTHS).index
         stack_lin = LinearRegression().fit(stack_df.loc[tail_idx, ["ridge", "sarimax"]],
                                            stack_df.loc[tail_idx, "actual"])
-        stack_fit = pd.Series(stack_lin.predict(stack_df[["ridge", "sarimax"]]), index=stack_df.index)
-
+        stack_fit = pd.Series(stack_lin.predict(stack_df[["ridge","sarimax"]]), index=stack_df.index)
         iso = IsotonicRegression(out_of_bounds="clip").fit(
-            stack_fit.loc[tail_idx].values,
-            stack_df.loc[tail_idx, "actual"].values
+            stack_fit.loc[tail_idx].values, stack_df.loc[tail_idx,"actual"].values
         )
         stack_fit_cal = stack_fit.copy()
         stack_fit_cal.loc[tail_idx] = iso.transform(stack_fit.loc[tail_idx].values)
 
         stack_future_in = pd.DataFrame({"ridge": ridge_fcst, "sarimax": sarimax_fcst}, index=ridge_fcst.index)
-        stack_fcst = pd.Series(stack_lin.predict(stack_future_in), index=stack_future_in.index)
-        stack_fcst = stack_fcst.astype(float)
+        stack_fcst = pd.Series(stack_lin.predict(stack_future_in), index=stack_future_in.index).astype(float)
         stack_fcst = pd.Series(iso.transform(stack_fcst.values), index=stack_fcst.index)
 
-    # --- Monte Carlo (path variety from model uncertainty; exog path stays YoY) ---
+    # Monte Carlo bands (noise around stacked forecast)
     sim_paths = []
+    resid_std = stack_df["actual"].sub(stack_fit_cal.reindex(stack_df.index)).std(ddof=1) if not stack_df.empty else 0.0
     for s in range(MC_SIMS):
-        # Use same YoY exog; randomness via ridge residual-like noise on stacked fcst
-        # (You can replace with bootstrapped residuals if desired.)
-        noise = np.random.default_rng(42 + s).normal(loc=0.0, scale=stack_df["actual"].sub(stack_fit_cal.reindex(stack_df.index)).std(ddof=1) or 0.0, size=len(stack_fcst))
+        noise = np.random.default_rng(42 + s).normal(loc=0.0, scale=resid_std or 0.0, size=len(stack_fcst))
         sim_paths.append((stack_fcst.values + noise).astype(float))
-
     if sim_paths:
         sim_df = pd.DataFrame(sim_paths, index=[f"sim_{i}" for i in range(MC_SIMS)]).T
         q_df = sim_df.quantile([0.05, 0.10, 0.50, 0.90, 0.95], axis=1).T
@@ -406,29 +365,23 @@ for TARGET, TSHORT in NORTH_STARS:
     else:
         q_df = pd.DataFrame(index=stack_fcst.index, columns=["p05", "p10", "p50", "p90", "p95"], dtype=float)
 
-    # Assemble output
     hist = pd.DataFrame({"actual": y})
     forecast_table = pd.concat([hist, stack_fit_cal.rename("fitted"), q_df], axis=1)
 
-    # Backtest metrics (last 18m of calibrated in-sample fit)
+    # Backtest metrics (last 18m of calibrated fit)
     test_win = min(CAL_WINDOW_MONTHS, len(stack_fit_cal))
     bt_idx = stack_fit_cal.dropna().tail(test_win).index
     bt_pred = stack_fit_cal.loc[bt_idx]
     bt_act  = y.loc[bt_idx]
     if len(bt_idx) >= 3 and not bt_pred.isna().any() and not bt_act.isna().any():
-        r = float(np.corrcoef(bt_pred, bt_act)[0,1])
-        r2 = float(r * r)
+        r = float(np.corrcoef(bt_pred, bt_act)[0,1]); r2 = float(r*r)
     else:
-        r = np.nan
-        r2 = np.nan
+        r = np.nan; r2 = np.nan
 
-    leaderboard = pd.DataFrame({"target": [TARGET], "R2_last18": [r2], "r_last18": [r]})
+    leaderboard = pd.DataFrame({"target":[TARGET], "R2_last18":[r2], "r_last18":[r]})
     leaderboard.to_csv(f"backtest_{TSHORT.lower()}.csv", index=False)
 
-    # Store
     results[TSHORT] = {"forecast_table": forecast_table, "leaderboard": leaderboard}
-
-    # Print
     print(f"\n=== {TSHORT} ===")
     print(leaderboard)
 
@@ -437,6 +390,11 @@ with pd.ExcelWriter(OUTPUT_XLSX, engine="xlsxwriter") as xw:
     long_df.to_excel(xw, sheet_name="Series_Long", index=False)
     wide_idx.to_excel(xw, sheet_name="Wide_Index2019")
     meta_df.to_excel(xw, sheet_name="Metadata", index=False)
+    # Optional diagnostics:
+    if not failed_df.empty:
+        failed_df.to_excel(xw, sheet_name="Failed", index=False)
+    if not latest_df.empty:
+        latest_df.to_excel(xw, sheet_name="Latest_Available", index=False)
     for TSHORT, pack in results.items():
         pack["forecast_table"].reset_index().rename(columns={"index": "date"}).to_excel(
             xw, sheet_name=f"Forecast_{TSHORT}", index=False

@@ -1,9 +1,9 @@
-name: FRED PPI (15th) — build & email
+name: FRED PPI (17th) — build & email
 
 on:
   schedule:
-    # 15th of every month at 14:00 UTC
-    - cron: "0 14 15 * *"
+    # 17th of every month at 14:00 UTC
+    - cron: "0 14 17 * *"
   workflow_dispatch: {}  # allow manual runs for testing
 
 jobs:

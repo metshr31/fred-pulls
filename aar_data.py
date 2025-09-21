@@ -12,36 +12,38 @@ EP724_FILENAME = "EP724_latest.xlsx"
 OUTPUT_FILE = "north_star_reconstructed.xlsx"
 CN_URL = "https://www.cn.ca/-/media/files/investors/investor-performance-measures/perf_measures_en.xlsx"
 
-# === EP724 FUNCTIONS ===
-def fill_from_ep724(rr_name, mapping):
-    ep724_path = os.path.join(DOWNLOAD_FOLDER, EP724_FILENAME)
-    df_raw = pd.read_excel(ep724_path, sheet_name=0)
+# === EP724 HELPERS ===
+def get_latest_ep724_url():
+    """Scrape STB page and return the latest EP724 Excel URL and date"""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(STB_URL, headers=headers)
+    soup = BeautifulSoup(response.text, 'html.parser')
 
-    # Filter for this railroad
-    rr_rows = df_raw[df_raw.iloc[:, 0] == rr_name].copy()
+    links = soup.find_all('a', href=True)
+    candidates = []
 
-    # Week columns start at col3
-    week_cols = df_raw.columns[3:].tolist()
+    for link in links:
+        href = link['href']
+        if "EP724" in href and href.endswith(".xlsx"):
+            match = re.search(r'(\d{4}-\d{2}-\d{2})', href)
+            if match:
+                date_str = match.group(1)
+                try:
+                    file_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+                    full_url = href if href.startswith("http") else f"https://www.stb.gov{href}"
+                    candidates.append((file_date, full_url))
+                except ValueError:
+                    continue
 
-    # Build skeleton
-    df = build_skeleton(rr_name)
-    for col in week_cols:
-        df[col] = None
+    if not candidates:
+        raise ValueError("❌ No valid EP724 files found.")
 
-    # Iterate raw rows and map into skeleton
-    for _, row in rr_rows.iterrows():
-        measure = str(row.iloc[1]).strip()
-        variable = str(row.iloc[2]).strip()
-        key = (measure, variable)
-
-        if key in mapping:
-            target = mapping[key]
-            values = row.iloc[3:].tolist()
-            df.loc[df["Category"] == target, week_cols] = values
-
-    return df
+    latest_file = max(candidates, key=lambda x: x[0])
+    print(f"🗌 Latest EP724 file found: {latest_file[0]} → {latest_file[1]}")
+    return latest_file[1]
 
 def download_ep724():
+    """Download the latest EP724 and return local path"""
     url = get_latest_ep724_url()
     save_path = os.path.join(DOWNLOAD_FOLDER, EP724_FILENAME)
     print(f"⬇️ Downloading EP724 file: {url}")
@@ -54,14 +56,16 @@ def download_ep724():
     else:
         raise Exception(f"❌ Failed to download EP724: Status code {response.status_code}")
 
-# === CPKC FUNCTION ===
+# === CPKC HELPER ===
 def get_cpkc_url():
     today = datetime.date.today()
-    offset = (today.weekday() - 0) % 7
+    offset = (today.weekday() - 0) % 7  # Monday = 0
     last_monday = today - datetime.timedelta(days=offset)
     candidates = [last_monday, last_monday - datetime.timedelta(days=7)]
+
     base = "https://s21.q4cdn.com/736796105/files/doc_downloads"
     filename = "CPKC-53-Week-Railway-Performance-Report.xlsx"
+
     for cand in candidates:
         date_str = cand.strftime("%Y/%m/%d")
         url = f"{base}/{date_str}/{filename}"
@@ -73,8 +77,8 @@ def get_cpkc_url():
         except Exception as e:
             print(f"⚠️ Could not reach {url}: {e}")
             continue
-    raise FileNotFoundError("❌ Could not find CPKC report.")
 
+    raise FileNotFoundError("❌ Could not find CPKC report for the last two Mondays.")
 # --------------------
 # CATEGORY SKELETONS
 # --------------------

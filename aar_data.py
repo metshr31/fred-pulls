@@ -59,8 +59,6 @@ def get_cpkc_url():
     today = datetime.date.today()
     offset = (today.weekday() - 0) % 7  # Monday = 0
     last_monday = today - datetime.timedelta(days=offset)
-
-    # Try this Monday and the one before
     candidates = [last_monday, last_monday - datetime.timedelta(days=7)]
 
     base = "https://s21.q4cdn.com/736796105/files/doc_downloads"
@@ -80,15 +78,67 @@ def get_cpkc_url():
 
     raise FileNotFoundError("❌ Could not find CPKC report for the last two Mondays.")
 
-# === RAW FILE SOURCES ===
+# === RAW SOURCES ===
 ep724_raw = download_ep724()
 cpkc_raw = get_cpkc_url()
 cn_raw = "https://www.cn.ca/-/media/files/investors/investor-performance-measures/perf_measures_en.xlsx"
 print(f"✅ CN file source: {cn_raw}")
 
-# === CATEGORY SKELETONS (keep same as before) ===
+# === CATEGORY SKELETONS ===
 categories = {
-    # ... (same dictionary we already built with BNI, CNI, CPKC, CSX, NSC, UNP lists)
+    "BNI": [
+        "System","Foreign RR","Private","Total  Cars","Pct. Private",
+        "Box","Covered Hopper","Gondola","Intermodal","Multilevel",
+        "Open Hopper","Tank","Other","Total",
+        "Intermodal","Manifest","Multilevel","Coal Unit","Grain Unit","All Trains",
+        "Barstow, CA","Denver, CO","Fort Worth, TX","Galesburg, IL","Houston, TX",
+        "Kansas City, KS","Lincoln, NE","Memphis, TN","Northtown, MN","Pasco, WA",
+        "Tulsa, OK","Entire Railroad"
+    ],
+    "CNI": [
+        "Walker Yard (Edmonton), AB","Fond du Lac Yard, WI","Jackson Yard, MS",
+        "MacMillan Yard (Toronto), ON","Markham Yard, IL","Harrison Yard (Memphis), TN",
+        "Symington Yard (Winnipeg), MB","Tascherau Yard (Montreal), QC","Thornton Yard (Vancouver), BC",
+        "Total Dwell - Major Yards","Entire Railroad",
+        "Intermodal","Manifest","Multilevel","Coal Unit","Grain Unit","All Trains",
+        "Total Shipments","Shipments without Bill","Percent without Customer Bill",
+        "System","Foreign RR","Private","Total  Cars",
+        "Box","Covered Hopper","Gondola","Intermodal","Multilevel","Open Hopper","Tank","Other","Total"
+    ],
+    "CPKC": [
+        "System","Foreign RR","Private","Total  Cars","Pct. Private",
+        "Box","Covered Hopper","Gondola","Intermodal","Multilevel",
+        "Open Hopper","Tank","Other","Total",
+        "Intermodal","Manifest","Multilevel","Coal Unit","Grain Unit","All Trains",
+        "Calgary, AB","Chicago, IL","Edmonton, AB","Vancouver, BC","Moose Jaw, SK",
+        "Montreal, QC","St Paul, MN","Thunder Bay, ON","Toronto, ON","Winnipeg, MB",
+        "Kansas City, MO","Sanchez, MX","Shreveport, LA","Monterrey, CA","Laredo Yard, TX",
+        "San Luis Potosi, MX","Jackson, MS","Entire Railroad"
+    ],
+    "CSX": [
+        "System","Total  Cars","Pct. Private",
+        "Box","Covered Hopper","Gondola","Intermodal","Multilevel","Open Hopper","Tank","Other","Total",
+        "Coal","Crude","Ethanol","Grain","Intermodal","Merch","System",
+        "Chicago, Il","Cincinnati, Oh","Baltimore, Md","Hamlet, Nc","Indianapolis, In",
+        "Jacksonville, Fl","Louisville, Ky","Nashville, Tn","Rocky Mount, Nc",
+        "Selkirk, Ny","Toledo, Oh","Waycross, Ga","Willard, Oh","System"
+    ],
+    "NSC": [
+        "System","Foreign RR","Private","Total  Cars","Pct. Private",
+        "Box","Covered Hopper","Gondola","Intermodal","Multilevel","Open Hopper","Tank","Other","Total",
+        "Intermodal","Manifest","Multilevel","Coal Unit","Grain Unit","All Trains",
+        "Allentown, PA","Bellevue, OH","Birmingham, AL","Chattanooga, TN","Columbus, OH","Conway, PA",
+        "Decatur, IL","Elkhart, IN","Atlanta, GA","Linwood, NC","Macon, GA","New Orleans, LA",
+        "Roanoke, VA","Sheffield, AL","Entire Railroad"
+    ],
+    "UNP": [
+        "System","Foreign RR","Private","Total  Cars","Pct. Private",
+        "Box","Covered Hopper","Gondola","Intermodal","Multilevel","Open Hopper","Tank","Other","Total",
+        "Intermodal","Manifest","Multilevel","Coal Unit","Grain Unit","All Trains",
+        "Chicago, IL - Proviso","Fort Worth, TX","Hinkle, OR","Houston, TX - Englewood","Houston, TX - Settegast",
+        "Kansas City, MO","Livonia, LA","North Little Rock, AR","Santa Teresa, NM",
+        "North Platte West, NE","Pine Bluff, AR","Roseville, CA","West Colton, CA","Entire Railroad"
+    ],
 }
 
 # === SKELETON BUILDER ===
@@ -102,8 +152,7 @@ def build_skeleton(rr, year=2025):
     return df[cols]
 
 # === MAPPING DICTIONARIES ===
-# mapping_bnsf, mapping_cn, mapping_cpkc, mapping_csx, mapping_nsc, mapping_unp
-# (hard-coded as we defined earlier, one per railroad)
+# (Paste in mapping_bnsf, mapping_cn, mapping_cpkc, mapping_csx, mapping_nsc, mapping_unp from my previous message)
 
 # === FILL FUNCTIONS ===
 def fill_from_ep724(rr_code, rr_name, mapping):
@@ -118,7 +167,6 @@ def fill_from_ep724(rr_code, rr_name, mapping):
         if not match.empty:
             row_vals = match.iloc[0, 6:58].values
             df.loc[df["Category"]==cat, df.columns[3:]] = row_vals
-    print(f"✅ Filled {rr_name} from EP724")
     return df
 
 def fill_cpkc():
@@ -128,7 +176,6 @@ def fill_cpkc():
         match = raw[raw.iloc[:,0].astype(str).str.contains(raw_label,case=False,na=False)]
         if not match.empty:
             df.loc[df["Category"]==cat, df.columns[3:]] = match.iloc[0,1:53].values
-    print("✅ Filled CPKC from live report")
     return df
 
 def fill_cn():
@@ -138,17 +185,41 @@ def fill_cn():
         match = raw[raw.iloc[:,0].astype(str).str.contains(raw_label,case=False,na=False)]
         if not match.empty:
             df.loc[df["Category"]==cat, df.columns[3:]] = match.iloc[0,1:53].values
-    print("✅ Filled CN from live report")
     return df
+
+# === VALIDATION ===
+def validate(df, rr):
+    missing = df[df.iloc[:,3:].isna().all(axis=1)]["Category"].tolist()
+    if missing:
+        print(f"⚠️ {rr}: Missing data for categories: {missing}")
+    else:
+        print(f"✅ {rr}: All categories populated.")
 
 # === MASTER PIPELINE ===
 output_file = "north_star_reconstructed.xlsx"
 with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
-    fill_from_ep724("BNI","BNSF",mapping_bnsf).to_excel(writer,sheet_name="BNSF",index=False)
-    fill_cn().to_excel(writer,sheet_name="CN",index=False)
-    fill_cpkc().to_excel(writer,sheet_name="CPKC",index=False)
-    fill_from_ep724("CSX","CSX",mapping_csx).to_excel(writer,sheet_name="CSX",index=False)
-    fill_from_ep724("NSC","NS",mapping_nsc).to_excel(writer,sheet_name="NS",index=False)
-    fill_from_ep724("UNP","UP",mapping_unp).to_excel(writer,sheet_name="UP",index=False)
+    df_bnsf = fill_from_ep724("BNI","BNSF",mapping_bnsf)
+    df_bnsf.to_excel(writer,sheet_name="BNSF",index=False)
+    validate(df_bnsf,"BNSF")
+
+    df_cn = fill_cn()
+    df_cn.to_excel(writer,sheet_name="CN",index=False)
+    validate(df_cn,"CN")
+
+    df_cpkc = fill_cpkc()
+    df_cpkc.to_excel(writer,sheet_name="CPKC",index=False)
+    validate(df_cpkc,"CPKC")
+
+    df_csx = fill_from_ep724("CSX","CSX",mapping_csx)
+    df_csx.to_excel(writer,sheet_name="CSX",index=False)
+    validate(df_csx,"CSX")
+
+    df_nsc = fill_from_ep724("NSC","NS",mapping_nsc)
+    df_nsc.to_excel(writer,sheet_name="NS",index=False)
+    validate(df_nsc,"NS")
+
+    df_unp = fill_from_ep724("UNP","UP",mapping_unp)
+    df_unp.to_excel(writer,sheet_name="UP",index=False)
+    validate(df_unp,"UP")
 
 print(f"🎉 Final North Star workbook written to {output_file}")

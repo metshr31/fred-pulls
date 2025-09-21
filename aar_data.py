@@ -13,29 +13,33 @@ OUTPUT_FILE = "north_star_reconstructed.xlsx"
 CN_URL = "https://www.cn.ca/-/media/files/investors/investor-performance-measures/perf_measures_en.xlsx"
 
 # === EP724 FUNCTIONS ===
-def get_latest_ep724_url():
-    headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(STB_URL, headers=headers)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    links = soup.find_all('a', href=True)
-    candidates = []
-    for link in links:
-        href = link['href']
-        if "EP724" in href and href.endswith(".xlsx"):
-            match = re.search(r'(\d{4}-\d{2}-\d{2})', href)
-            if match:
-                date_str = match.group(1)
-                try:
-                    file_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
-                    full_url = href if href.startswith("http") else f"https://www.stb.gov{href}"
-                    candidates.append((file_date, full_url))
-                except ValueError:
-                    continue
-    if not candidates:
-        raise ValueError("❌ No valid EP724 files found.")
-    latest_file = max(candidates, key=lambda x: x[0])
-    print(f"🗌 Latest EP724 file found: {latest_file[0]} → {latest_file[1]}")
-    return latest_file[1]
+def fill_from_ep724(rr_name, mapping):
+    ep724_path = os.path.join(DOWNLOAD_FOLDER, EP724_FILENAME)
+    df_raw = pd.read_excel(ep724_path, sheet_name=0)
+
+    # Filter for this railroad
+    rr_rows = df_raw[df_raw.iloc[:, 0] == rr_name].copy()
+
+    # Week columns start at col3
+    week_cols = df_raw.columns[3:].tolist()
+
+    # Build skeleton
+    df = build_skeleton(rr_name)
+    for col in week_cols:
+        df[col] = None
+
+    # Iterate raw rows and map into skeleton
+    for _, row in rr_rows.iterrows():
+        measure = str(row.iloc[1]).strip()
+        variable = str(row.iloc[2]).strip()
+        key = (measure, variable)
+
+        if key in mapping:
+            target = mapping[key]
+            values = row.iloc[3:].tolist()
+            df.loc[df["Category"] == target, week_cols] = values
+
+    return df
 
 def download_ep724():
     url = get_latest_ep724_url()
@@ -140,148 +144,158 @@ categories = {
 # --------------------
 
 mapping_bnsf = {
-    "System": "System",
-    "Foreign RR": "Foreign RR",
-    "Private": "Private",
-    "Total Cars": "Total  Cars",
-    "% Private": "Pct. Private",
-    "Box": "Box",
-    "Covered Hopper": "Covered Hopper",
-    "Gondola": "Gondola",
-    "Intermodal": "Intermodal",
-    "Multilevel": "Multilevel",
-    "Open Hopper": "Open Hopper",
-    "Tank": "Tank",
-    "Other": "Other",
-    "Total": "Total",
-    "Intermodal Trains": "Intermodal",
-    "Manifest Trains": "Manifest",
-    "Multilevel Trains": "Multilevel",
-    "Coal Unit Trains": "Coal Unit",
-    "Grain Unit Trains": "Grain Unit",
-    "All Trains": "All Trains",
-    "Barstow, CA": "Barstow, CA",
-    "Denver, CO": "Denver, CO",
-    "Fort Worth, TX": "Fort Worth, TX",
-    "Galesburg, IL": "Galesburg, IL",
-    "Houston, TX": "Houston, TX",
-    "Kansas City, KS": "Kansas City, KS",
-    "Lincoln, NE": "Lincoln, NE",
-    "Memphis, TN": "Memphis, TN",
-    "Northtown, MN": "Northtown, MN",
-    "Pasco, WA": "Pasco, WA",
-    "Tulsa, OK": "Tulsa, OK",
-    "Entire Railroad": "Entire Railroad"
+    ("Cars On Line (Count)", "System"): "System",
+    ("Cars On Line (Count)", "Foreign RR"): "Foreign RR",
+    ("Cars On Line (Count)", "Private"): "Private",
+    ("Cars On Line (Count)", "Total"): "Total  Cars",
+    ("Cars On Line (Count)", "% Private"): "Pct. Private",
+    ("Cars On Line (Count)", "Box"): "Box",
+    ("Cars On Line (Count)", "Covered Hopper"): "Covered Hopper",
+    ("Cars On Line (Count)", "Gondola"): "Gondola",
+    ("Cars On Line (Count)", "Intermodal"): "Intermodal",
+    ("Cars On Line (Count)", "Multilevel (automotive)"): "Multilevel",
+    ("Cars On Line (Count)", "Open Hopper"): "Open Hopper",
+    ("Cars On Line (Count)", "Tank"): "Tank",
+    ("Cars On Line (Count)", "Other"): "Other",
+    ("Cars On Line (Count)", "Total"): "Total",
+
+    ("Average Train Speed  (MPH)", "Intermodal"): "Intermodal",
+    ("Average Train Speed  (MPH)", "Manifest"): "Manifest",
+    ("Average Train Speed  (MPH)", "Automotive unit"): "Multilevel",
+    ("Average Train Speed  (MPH)", "Coal unit"): "Coal Unit",
+    ("Average Train Speed  (MPH)", "Grain unit"): "Grain Unit",
+    ("Average Train Speed  (MPH)", "System"): "All Trains",
+
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Barstow, CA"): "Barstow, CA",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Denver, CO"): "Denver, CO",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Fort Worth, TX"): "Fort Worth, TX",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Galesburg, IL"): "Galesburg, IL",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Houston, TX"): "Houston, TX",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Kansas City, KS"): "Kansas City, KS",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Lincoln, NE"): "Lincoln, NE",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Memphis, TN"): "Memphis, TN",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Northtown, MN"): "Northtown, MN",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Pasco, WA"): "Pasco, WA",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Tulsa, OK"): "Tulsa, OK",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "System"): "Entire Railroad",
 }
 
 mapping_csx = {
-    "System": "System",
-    "Total Cars": "Total  Cars",
-    "% Private": "Pct. Private",
-    "Box": "Box",
-    "Covered Hopper": "Covered Hopper",
-    "Gondola": "Gondola",
-    "Intermodal": "Intermodal",
-    "Multilevel": "Multilevel",
-    "Open Hopper": "Open Hopper",
-    "Tank": "Tank",
-    "Other": "Other",
-    "Total": "Total",
-    "Coal": "Coal",
-    "Crude": "Crude",
-    "Ethanol": "Ethanol",
-    "Grain": "Grain",
-    "Intermodal (Service)": "Intermodal",
-    "Merch": "Merch",
-    "Chicago, Il": "Chicago, Il",
-    "Cincinnati, Oh": "Cincinnati, Oh",
-    "Baltimore, Md": "Baltimore, Md",
-    "Hamlet, Nc": "Hamlet, Nc",
-    "Indianapolis, In": "Indianapolis, In",
-    "Jacksonville, Fl": "Jacksonville, Fl",
-    "Louisville, Ky": "Louisville, Ky",
-    "Nashville, Tn": "Nashville, Tn",
-    "Rocky Mount, Nc": "Rocky Mount, Nc",
-    "Selkirk, Ny": "Selkirk, Ny",
-    "Toledo, Oh": "Toledo, Oh",
-    "Waycross, Ga": "Waycross, Ga",
-    "Willard, Oh": "Willard, Oh",
-    "System (Service)": "System"
+    ("Cars On Line (Count)", "System"): "System",
+    ("Cars On Line (Count)", "Total"): "Total  Cars",
+    ("Cars On Line (Count)", "% Private"): "Pct. Private",
+    ("Cars On Line (Count)", "Box"): "Box",
+    ("Cars On Line (Count)", "Covered Hopper"): "Covered Hopper",
+    ("Cars On Line (Count)", "Gondola"): "Gondola",
+    ("Cars On Line (Count)", "Intermodal"): "Intermodal",
+    ("Cars On Line (Count)", "Multilevel (automotive)"): "Multilevel",
+    ("Cars On Line (Count)", "Open Hopper"): "Open Hopper",
+    ("Cars On Line (Count)", "Tank"): "Tank",
+    ("Cars On Line (Count)", "Other"): "Other",
+    ("Cars On Line (Count)", "Total"): "Total",
+
+    ("Average Train Speed  (MPH)", "Coal unit"): "Coal",
+    ("Average Train Speed  (MPH)", "Crude oil unit"): "Crude",
+    ("Average Train Speed  (MPH)", "Ethanol unit"): "Ethanol",
+    ("Average Train Speed  (MPH)", "Grain unit"): "Grain",
+    ("Average Train Speed  (MPH)", "Intermodal"): "Intermodal",
+    ("Average Train Speed  (MPH)", "Manifest"): "Merch",
+    ("Average Train Speed  (MPH)", "System"): "System",
+
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Chicago, Il"): "Chicago, Il",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Cincinnati, Oh"): "Cincinnati, Oh",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Baltimore, Md"): "Baltimore, Md",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Hamlet, Nc"): "Hamlet, Nc",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Indianapolis, In"): "Indianapolis, In",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Jacksonville, Fl"): "Jacksonville, Fl",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Louisville, Ky"): "Louisville, Ky",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Nashville, Tn"): "Nashville, Tn",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Rocky Mount, Nc"): "Rocky Mount, Nc",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Selkirk, Ny"): "Selkirk, Ny",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Toledo, Oh"): "Toledo, Oh",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Waycross, Ga"): "Waycross, Ga",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Willard, Oh"): "Willard, Oh",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "System"): "System",
 }
 
 mapping_nsc = {
-    "System": "System",
-    "Foreign RR": "Foreign RR",
-    "Private": "Private",
-    "Total Cars": "Total  Cars",
-    "% Private": "Pct. Private",
-    "Box": "Box",
-    "Covered Hopper": "Covered Hopper",
-    "Gondola": "Gondola",
-    "Intermodal": "Intermodal",
-    "Multilevel": "Multilevel",
-    "Open Hopper": "Open Hopper",
-    "Tank": "Tank",
-    "Other": "Other",
-    "Total": "Total",
-    "Intermodal Trains": "Intermodal",
-    "Manifest Trains": "Manifest",
-    "Multilevel Trains": "Multilevel",
-    "Coal Unit Trains": "Coal Unit",
-    "Grain Unit Trains": "Grain Unit",
-    "All Trains": "All Trains",
-    "Allentown, PA": "Allentown, PA",
-    "Bellevue, OH": "Bellevue, OH",
-    "Birmingham, AL": "Birmingham, AL",
-    "Chattanooga, TN": "Chattanooga, TN",
-    "Columbus, OH": "Columbus, OH",
-    "Conway, PA": "Conway, PA",
-    "Decatur, IL": "Decatur, IL",
-    "Elkhart, IN": "Elkhart, IN",
-    "Atlanta, GA": "Atlanta, GA",
-    "Linwood, NC": "Linwood, NC",
-    "Macon, GA": "Macon, GA",
-    "New Orleans, LA": "New Orleans, LA",
-    "Roanoke, VA": "Roanoke, VA",
-    "Sheffield, AL": "Sheffield, AL",
-    "Entire Railroad": "Entire Railroad"
+    ("Cars On Line (Count)", "System"): "System",
+    ("Cars On Line (Count)", "Foreign RR"): "Foreign RR",
+    ("Cars On Line (Count)", "Private"): "Private",
+    ("Cars On Line (Count)", "Total"): "Total  Cars",
+    ("Cars On Line (Count)", "% Private"): "Pct. Private",
+    ("Cars On Line (Count)", "Box"): "Box",
+    ("Cars On Line (Count)", "Covered Hopper"): "Covered Hopper",
+    ("Cars On Line (Count)", "Gondola"): "Gondola",
+    ("Cars On Line (Count)", "Intermodal"): "Intermodal",
+    ("Cars On Line (Count)", "Multilevel (automotive)"): "Multilevel",
+    ("Cars On Line (Count)", "Open Hopper"): "Open Hopper",
+    ("Cars On Line (Count)", "Tank"): "Tank",
+    ("Cars On Line (Count)", "Other"): "Other",
+    ("Cars On Line (Count)", "Total"): "Total",
+
+    ("Average Train Speed  (MPH)", "Intermodal"): "Intermodal",
+    ("Average Train Speed  (MPH)", "Manifest"): "Manifest",
+    ("Average Train Speed  (MPH)", "Automotive unit"): "Multilevel",
+    ("Average Train Speed  (MPH)", "Coal unit"): "Coal Unit",
+    ("Average Train Speed  (MPH)", "Grain unit"): "Grain Unit",
+    ("Average Train Speed  (MPH)", "System"): "All Trains",
+
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Allentown, PA"): "Allentown, PA",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Bellevue, OH"): "Bellevue, OH",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Birmingham, AL"): "Birmingham, AL",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Chattanooga, TN"): "Chattanooga, TN",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Columbus, OH"): "Columbus, OH",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Conway, PA"): "Conway, PA",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Decatur, IL"): "Decatur, IL",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Elkhart, IN"): "Elkhart, IN",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Atlanta, GA"): "Atlanta, GA",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Linwood, NC"): "Linwood, NC",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Macon, GA"): "Macon, GA",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "New Orleans, LA"): "New Orleans, LA",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Roanoke, VA"): "Roanoke, VA",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Sheffield, AL"): "Sheffield, AL",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "System"): "Entire Railroad",
 }
 
-mapping_unp = {
-    "System": "System",
-    "Foreign RR": "Foreign RR",
-    "Private": "Private",
-    "Total Cars": "Total  Cars",
-    "% Private": "Pct. Private",
-    "Box": "Box",
-    "Covered Hopper": "Covered Hopper",
-    "Gondola": "Gondola",
-    "Intermodal": "Intermodal",
-    "Multilevel": "Multilevel",
-    "Open Hopper": "Open Hopper",
-    "Tank": "Tank",
-    "Other": "Other",
-    "Total": "Total",
-    "Intermodal Trains": "Intermodal",
-    "Manifest Trains": "Manifest",
-    "Multilevel Trains": "Multilevel",
-    "Coal Unit Trains": "Coal Unit",
-    "Grain Unit Trains": "Grain Unit",
-    "All Trains": "All Trains",
-    "Chicago, IL - Proviso": "Chicago, IL - Proviso",
-    "Fort Worth, TX": "Fort Worth, TX",
-    "Hinkle, OR": "Hinkle, OR",
-    "Houston, TX - Englewood": "Houston, TX - Englewood",
-    "Houston, TX - Settegast": "Houston, TX - Settegast",
-    "Kansas City, MO": "Kansas City, MO",
-    "Livonia, LA": "Livonia, LA",
-    "North Little Rock, AR": "North Little Rock, AR",
-    "Santa Teresa, NM": "Santa Teresa, NM",
-    "North Platte West, NE": "North Platte West, NE",
-    "Pine Bluff, AR": "Pine Bluff, AR",
-    "Roseville, CA": "Roseville, CA",
-    "West Colton, CA": "West Colton, CA",
-    "Entire Railroad": "Entire Railroad"
+mapping_nsc = {
+    ("Cars On Line (Count)", "System"): "System",
+    ("Cars On Line (Count)", "Foreign RR"): "Foreign RR",
+    ("Cars On Line (Count)", "Private"): "Private",
+    ("Cars On Line (Count)", "Total"): "Total  Cars",
+    ("Cars On Line (Count)", "% Private"): "Pct. Private",
+    ("Cars On Line (Count)", "Box"): "Box",
+    ("Cars On Line (Count)", "Covered Hopper"): "Covered Hopper",
+    ("Cars On Line (Count)", "Gondola"): "Gondola",
+    ("Cars On Line (Count)", "Intermodal"): "Intermodal",
+    ("Cars On Line (Count)", "Multilevel (automotive)"): "Multilevel",
+    ("Cars On Line (Count)", "Open Hopper"): "Open Hopper",
+    ("Cars On Line (Count)", "Tank"): "Tank",
+    ("Cars On Line (Count)", "Other"): "Other",
+    ("Cars On Line (Count)", "Total"): "Total",
+
+    ("Average Train Speed  (MPH)", "Intermodal"): "Intermodal",
+    ("Average Train Speed  (MPH)", "Manifest"): "Manifest",
+    ("Average Train Speed  (MPH)", "Automotive unit"): "Multilevel",
+    ("Average Train Speed  (MPH)", "Coal unit"): "Coal Unit",
+    ("Average Train Speed  (MPH)", "Grain unit"): "Grain Unit",
+    ("Average Train Speed  (MPH)", "System"): "All Trains",
+
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Allentown, PA"): "Allentown, PA",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Bellevue, OH"): "Bellevue, OH",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Birmingham, AL"): "Birmingham, AL",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Chattanooga, TN"): "Chattanooga, TN",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Columbus, OH"): "Columbus, OH",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Conway, PA"): "Conway, PA",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Decatur, IL"): "Decatur, IL",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Elkhart, IN"): "Elkhart, IN",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Atlanta, GA"): "Atlanta, GA",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Linwood, NC"): "Linwood, NC",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Macon, GA"): "Macon, GA",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "New Orleans, LA"): "New Orleans, LA",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Roanoke, VA"): "Roanoke, VA",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "Sheffield, AL"): "Sheffield, AL",
+    ("Average Terminal Dwell Time (Excluding Cars on Line)", "System"): "Entire Railroad",
 }
 
 # --------------------
@@ -361,7 +375,7 @@ def main():
 
     with pd.ExcelWriter(OUTPUT_FILE, engine="xlsxwriter") as writer:
         # EP724 carriers
-        df_bnsf = fill_from_ep724("BNI", mapping_bnsf)
+        df_bnsf = fill_from_ep724("BNSF", mapping_bnsf)
         df_bnsf.to_excel(writer, sheet_name="BNSF", index=False)
 
         df_csx = fill_from_ep724("CSX", mapping_csx)

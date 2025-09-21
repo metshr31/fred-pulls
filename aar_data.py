@@ -291,14 +291,20 @@ mapping_unp = {
 def build_skeleton(rr):
     return pd.DataFrame({"Category": categories[rr]})
 
-def fill_from_ep724(rr_code, rr_name, mapping):
+def fill_from_ep724(rr_code, mapping):
     ep724_path = os.path.join(DOWNLOAD_FOLDER, EP724_FILENAME)
-    df_raw = pd.read_excel(ep724_path, sheet_name=rr_name)
+    # Load the first sheet (EP724 files typically only have one)
+    df_raw = pd.read_excel(ep724_path, sheet_name=0)
+
     df = build_skeleton(rr_code)
+    rr_rows = df_raw[df_raw.iloc[:,0] == rr_code]  # filter by RR code in col 0
+
     for raw_label, mapped in mapping.items():
-        if raw_label in df_raw.iloc[:,0].values:
-            row = df_raw[df_raw.iloc[:,0] == raw_label].iloc[0,1:].tolist()
-            df.loc[df["Category"] == mapped, df.columns[1]:] = row
+        row = rr_rows[rr_rows.iloc[:,1] == raw_label]  # labels are in col 1
+        if not row.empty:
+            values = row.iloc[0,2:].tolist()
+            df.loc[df["Category"] == mapped, df.columns[1]:] = values
+
     return df
 
 def fill_from_cn():
@@ -328,21 +334,32 @@ def fill_from_cpkc(cpkc_url):
 # --------------------
 # MAIN
 # --------------------
+# --------------------
+# MAIN
+# --------------------
 def main():
     ep724_path = download_ep724()
     cpkc_url = get_cpkc_url()
 
     with pd.ExcelWriter(OUTPUT_FILE, engine="xlsxwriter") as writer:
-        df_bnsf = fill_from_ep724("BNI","BNSF",mapping_bnsf)
+        # EP724 carriers
+        df_bnsf = fill_from_ep724("BNI", mapping_bnsf)
         df_bnsf.to_excel(writer, sheet_name="BNSF", index=False)
-        df_csx = fill_from_ep724("CSX","CSX",mapping_csx)
+
+        df_csx = fill_from_ep724("CSX", mapping_csx)
         df_csx.to_excel(writer, sheet_name="CSX", index=False)
-        df_nsc = fill_from_ep724("NSC","NS",mapping_nsc)
+
+        df_nsc = fill_from_ep724("NSC", mapping_nsc)
         df_nsc.to_excel(writer, sheet_name="NS", index=False)
-        df_unp = fill_from_ep724("UNP","UP",mapping_unp)
+
+        df_unp = fill_from_ep724("UNP", mapping_unp)
         df_unp.to_excel(writer, sheet_name="UP", index=False)
+
+        # CN (direct file)
         df_cn = fill_from_cn()
         df_cn.to_excel(writer, sheet_name="CN", index=False)
+
+        # CPKC (direct file)
         df_cpkc = fill_from_cpkc(cpkc_url)
         df_cpkc.to_excel(writer, sheet_name="CPKC", index=False)
 

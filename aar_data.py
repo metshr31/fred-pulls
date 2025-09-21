@@ -309,12 +309,22 @@ def fill_from_ep724(rr_code, mapping):
 
 def fill_from_cn():
     df_raw = pd.read_excel(CN_URL, sheet_name="53 Weeks History")
+
+    # Build skeleton
     df = build_skeleton("CNI")
+
+    # Add week columns from CN file (everything after the first 2 cols)
+    week_cols = df_raw.columns[2:].tolist()
+    for col in week_cols:
+        df[col] = None
+
+    # Fill values into skeleton
     for idx, row in df_raw.iterrows():
         label = str(row.iloc[0]).strip()
         if label in categories["CNI"]:
             values = row.iloc[2:].tolist()
-            df.loc[df["Category"] == label, df.columns[1]:] = values
+            df.loc[df["Category"] == label, week_cols] = values
+
     return df
 
 def fill_from_cpkc(cpkc_url):
@@ -322,18 +332,26 @@ def fill_from_cpkc(cpkc_url):
     tmpfile = os.path.join(DOWNLOAD_FOLDER, "CPKC.xlsx")
     with open(tmpfile, "wb") as f:
         f.write(r.content)
+
     df_raw = pd.read_excel(tmpfile, sheet_name="Railroad Performance All Years")
+
+    # Build skeleton
     df = build_skeleton("CPKC")
+
+    # Add week columns from CPKC file (everything after the first col)
+    week_cols = df_raw.columns[1:].tolist()
+    for col in week_cols:
+        df[col] = None
+
+    # Fill values into skeleton
     for idx, row in df_raw.iterrows():
         label = str(row.iloc[0]).strip()
         if label in categories["CPKC"]:
             values = row.iloc[1:].tolist()
-            df.loc[df["Category"] == label, df.columns[1]:] = values
+            df.loc[df["Category"] == label, week_cols] = values
+
     return df
 
-# --------------------
-# MAIN
-# --------------------
 # --------------------
 # MAIN
 # --------------------

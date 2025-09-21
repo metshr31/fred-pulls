@@ -1,0 +1,32 @@
+name: Build North Star Workbook
+
+on:
+  workflow_dispatch:   # 👈 Manual trigger in Actions tab
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests beautifulsoup4 openpyxl xlsxwriter lxml
+
+      - name: Run aar_data.py
+        run: |
+          python aar_data.py
+
+      - name: Upload workbook artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: north_star_output
+          path: north_star_reconstructed.xlsx

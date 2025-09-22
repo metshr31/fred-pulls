@@ -107,15 +107,31 @@ def ep724_get_week_cols(df_raw):
 def fill_from_ep724(rr_code):
     """
     Fill one RR from EP724 consolidated file using descriptor columns
-    (Railroad/Region, Variable, Sub-Variable) instead of row numbers.
+    (railroad_region, variable, sub_variable, measure).
+    Auto-normalizes headers so naming quirks (spaces, slashes, newlines) won't break it.
     """
     ep724_path = os.path.join(DOWNLOAD_FOLDER, EP724_FILENAME)
     print(f"📊 Loading EP724 data for {rr_code}...")
     df_raw = pd.read_excel(ep724_path, sheet_name=0, engine="openpyxl")
     print(f"📊 EP724 data loaded: {df_raw.shape[0]} rows, {df_raw.shape[1]} columns")
 
-    # Normalize text columns
-    for col in ["Railroad/Region", "Measure", "Variable", "Sub-Variable"]:
+    # --- Normalize column names ---
+    df_raw.columns = (
+        df_raw.columns.astype(str)
+        .str.strip()
+        .str.replace(r"[\s/]+", "_", regex=True)  # spaces, slashes, newlines → underscore
+        .str.lower()
+    )
+    print("🔎 Normalized columns:", list(df_raw.columns[:10]))
+
+    # Ensure key columns exist
+    expected = ["railroad_region", "variable", "sub_variable", "measure"]
+    for col in expected:
+        if col not in df_raw.columns:
+            print(f"⚠️ Warning: expected column '{col}' not found in EP724 file")
+
+    # Normalize descriptor text columns
+    for col in expected:
         if col in df_raw.columns:
             df_raw[col] = df_raw[col].astype(str).str.strip().str.lower()
 
@@ -131,15 +147,17 @@ def fill_from_ep724(rr_code):
     for category in categories[rr_code]:
         norm_cat = category.strip().lower()
 
-        # Match on Variable or Sub-Variable (sometimes in Measure)
-        matches = df_raw[
-            (df_raw["Railroad/Region"] == rr_code.lower())
-            & (
-                df_raw["Variable"].str.contains(norm_cat, na=False)
-                | df_raw["Sub-Variable"].str.contains(norm_cat, na=False)
-                | df_raw["Measure"].str.contains(norm_cat, na=False)
-            )
-        ]
+        # Filter rows for this RR
+        rr_mask = df_raw["railroad_region"] == rr_code.lower() if "railroad_region" in df_raw else True
+
+        # Match category against variable / sub_variable / measure
+        cat_mask = (
+            (df_raw["variable"].str.contains(norm_cat, na=False) if "variable" in df_raw else False)
+            | (df_raw["sub_variable"].str.contains(norm_cat, na=False) if "sub_variable" in df_raw else False)
+            | (df_raw["measure"].str.contains(norm_cat, na=False) if "measure" in df_raw else False)
+        )
+
+        matches = df_raw[rr_mask & cat_mask]
 
         if matches.empty:
             print(f"⚠️ Could not find row for '{category}' in {rr_code}")

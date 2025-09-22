@@ -379,25 +379,32 @@ categories = {
 
 # --------------------
 # MAIN
-# -----------------
+# --------------------
 def main():
-        ep724_path = download_ep724()
-        cpkc_url = get_cpkc_url()
+    ep724_path = download_ep724()
+    cpkc_url = get_cpkc_url()
 
-        print("📝 Creating output Excel file...")
-        with pd.ExcelWriter(OUTPUT_FILE, engine="xlsxwriter") as writer:
-            print("🚂 Processing BNSF...")
-            fill_from_ep724("BNSF").to_excel(writer, sheet_name="BNSF", index=False)
-            print("🚂 Processing CSX...")
-            fill_from_ep724("CSX").to_excel(writer, sheet_name="CSX", index=False)
-            print("🚂 Processing NS...")
-            fill_from_ep724("NS").to_excel(writer, sheet_name="NS", index=False)
-            print("🚂 Processing UP...")
-            fill_from_ep724("UP").to_excel(writer, sheet_name="UP", index=False)
+    print("📝 Creating output Excel file...")
+    with pd.ExcelWriter(OUTPUT_FILE, engine="xlsxwriter") as writer:
+        print("🚂 Processing BNSF...")
+        fill_from_ep724("BNSF").to_excel(writer, sheet_name="BNSF", index=False)
+        print("🚂 Processing CSX...")
+        fill_from_ep724("CSX").to_excel(writer, sheet_name="CSX", index=False)
+        print("🚂 Processing NS...")
+        fill_from_ep724("NS").to_excel(writer, sheet_name="NS", index=False)
+        print("🚂 Processing UP...")
+        fill_from_ep724("UP").to_excel(writer, sheet_name="UP", index=False)
 
-            print("🚂 Processing CN...")
-            fill_from_cn().to_excel(writer, sheet_name="CN", index=False)
-            print("🚂 Processing CPKC...")
-            fill_from_cpkc(cpkc_url).to_excel(writer, sheet_name="CPKC", index=False)
+        print("🚂 Processing CN...")
+        fill_from_cn().to_excel(writer, sheet_name="CN", index=False)
+        print("🚂 Processing CPKC...")
+        fill_from_cpkc(cpkc_url).to_excel(writer, sheet_name="CPKC", index=False)
 
-        print(f"✅ All carriers written to {OUTPUT_FILE}")
+    print(f"✅ All carriers written to {OUTPUT_FILE}")
+    print("📂 Current working directory:", os.getcwd())
+    print("🔎 File exists?", os.path.isfile(OUTPUT_FILE))
+
+
+if __name__ == "__main__":
+    main()
+    print("✅ Finished run. File exists:", os.path.isfile(OUTPUT_FILE))

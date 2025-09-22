@@ -87,63 +87,70 @@ def build_skeleton(rr):
 
 
 def ep724_get_week_cols(df_raw):
-    """Convert EP724 date columns to week numbers for current year only."""
+    """Return list of (col_name, week_label) for current year week columns."""
     week_cols = []
     this_year = datetime.date.today().year
-    for col in df_raw.columns[3:]:
+    # Week data always starts after descriptor columns
+    descriptor_cols = ["Railroad/Region", "Category No.", "Sub-Category", "Measure", "Variable", "Sub-Variable"]
+    for col in df_raw.columns:
+        if col in descriptor_cols:
+            continue
         try:
-            dt = pd.to_datetime(col)
-            if dt.year == this_year:
-                week_label = f"Week {dt.isocalendar().week}"
-                week_cols.append((col, week_label))
+            dt = pd.to_datetime(col, errors="coerce")
+            if pd.notna(dt) and dt.year == this_year:
+                week_cols.append((col, f"Week {dt.isocalendar().week}"))
         except Exception:
             continue
     return week_cols
 
 
 def fill_from_ep724(rr_code):
-        """
-        Fill one RR from EP724 consolidated file using dynamic, fuzzy row lookup.
-        """
-        ep724_path = os.path.join(DOWNLOAD_FOLDER, EP724_FILENAME)
-        print(f"📊 Loading EP724 data for {rr_code}...")
-        df_raw = pd.read_excel(ep724_path, sheet_name=0, header=None, engine="openpyxl")
-        print(f"📊 EP724 data loaded: {df_raw.shape[0]} rows, {df_raw.shape[1]} columns")
+    """
+    Fill one RR from EP724 consolidated file using descriptor columns
+    (Railroad/Region, Variable, Sub-Variable) instead of row numbers.
+    """
+    ep724_path = os.path.join(DOWNLOAD_FOLDER, EP724_FILENAME)
+    print(f"📊 Loading EP724 data for {rr_code}...")
+    df_raw = pd.read_excel(ep724_path, sheet_name=0, engine="openpyxl")
+    print(f"📊 EP724 data loaded: {df_raw.shape[0]} rows, {df_raw.shape[1]} columns")
 
-        # Normalize the first column (labels)
-        df_raw[0] = df_raw[0].astype(str).str.strip().str.lower()
+    # Normalize text columns
+    for col in ["Railroad/Region", "Measure", "Variable", "Sub-Variable"]:
+        if col in df_raw.columns:
+            df_raw[col] = df_raw[col].astype(str).str.strip().str.lower()
 
-        # Build skeleton
-        df = build_skeleton(rr_code)
+    # Build skeleton
+    df = build_skeleton(rr_code)
 
-        # Prepare week columns
-        week_cols = ep724_get_week_cols(df_raw)
-        for _, wk in week_cols:
-            df[wk] = None
+    # Prepare week columns
+    week_cols = ep724_get_week_cols(df_raw)
+    for _, wk in week_cols:
+        df[wk] = None
 
-        # Loop through categories
-        for category in categories[rr_code]:
-            norm_cat = category.strip().lower()
+    # Loop through categories
+    for category in categories[rr_code]:
+        norm_cat = category.strip().lower()
 
-            # Find candidate rows where col0 contains the category text
-            matches = df_raw.index[df_raw[0].str.contains(norm_cat, na=False)].tolist()
+        # Match on Variable or Sub-Variable (sometimes in Measure)
+        matches = df_raw[
+            (df_raw["Railroad/Region"] == rr_code.lower())
+            & (
+                df_raw["Variable"].str.contains(norm_cat, na=False)
+                | df_raw["Sub-Variable"].str.contains(norm_cat, na=False)
+                | df_raw["Measure"].str.contains(norm_cat, na=False)
+            )
+        ]
 
-            if not matches:
-                print(f"⚠️ Could not find row for '{category}' in {rr_code}")
-                continue
+        if matches.empty:
+            print(f"⚠️ Could not find row for '{category}' in {rr_code}")
+            continue
 
-            rownum = matches[0]  # take the first match
-            vals_this_year = []
-            for col, wk in week_cols:
-                try:
-                    idx = df_raw.columns.get_loc(col)
-                    vals_this_year.append(df_raw.iloc[rownum, idx])
-                except Exception:
-                    vals_this_year.append(None)
+        row = matches.iloc[0]
+        vals_this_year = [row[col] if col in row else None for col, _ in week_cols]
 
-            df.loc[df["Category"] == category, [wk for _, wk in week_cols]] = vals_this_year
+        df.loc[df["Category"] == category, [wk for _, wk in week_cols]] = vals_this_year
 
-        return df
+    return df
 
 def fill_from_cn():
     df_raw = pd.read_excel(CN_URL, sheet_name="53 Weeks History", engine='openpyxl')

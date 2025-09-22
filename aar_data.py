@@ -101,37 +101,49 @@ def ep724_get_week_cols(df_raw):
     return week_cols
 
 
-def fill_from_ep724(rr_code, row_map):
-    """Fill one RR from EP724 consolidated file using explicit row map."""
-    ep724_path = os.path.join(DOWNLOAD_FOLDER, EP724_FILENAME)
-    print(f"📊 Loading EP724 data for {rr_code}...")
-    df_raw = pd.read_excel(ep724_path, sheet_name=0, header=None, engine='openpyxl')
-    print(f"📊 EP724 data loaded: {df_raw.shape[0]} rows, {df_raw.shape[1]} columns")
+def fill_from_ep724(rr_code):
+        """
+        Fill one RR from EP724 consolidated file using dynamic, fuzzy row lookup.
+        """
+        ep724_path = os.path.join(DOWNLOAD_FOLDER, EP724_FILENAME)
+        print(f"📊 Loading EP724 data for {rr_code}...")
+        df_raw = pd.read_excel(ep724_path, sheet_name=0, header=None, engine="openpyxl")
+        print(f"📊 EP724 data loaded: {df_raw.shape[0]} rows, {df_raw.shape[1]} columns")
 
-    # Build skeleton
-    df = build_skeleton(rr_code)
+        # Normalize the first column (labels)
+        df_raw[0] = df_raw[0].astype(str).str.strip().str.lower()
 
-    # Prepare week columns
-    week_cols = ep724_get_week_cols(df_raw)
-    for _, wk in week_cols:
-        df[wk] = None
+        # Build skeleton
+        df = build_skeleton(rr_code)
 
-    # Fill rows
-    for category, rownum in row_map.items():
-        if rownum is None:
-            continue
-        values = df_raw.iloc[rownum, 3:].tolist()
-        vals_this_year = []
-        for col, wk in week_cols:
-            try:
-                idx = df_raw.columns.get_loc(col)
-                vals_this_year.append(df_raw.iloc[rownum, idx])
-            except Exception:
-                vals_this_year.append(None)
-        df.loc[df["Category"] == category, [wk for _, wk in week_cols]] = vals_this_year
+        # Prepare week columns
+        week_cols = ep724_get_week_cols(df_raw)
+        for _, wk in week_cols:
+            df[wk] = None
 
-    return df
+        # Loop through categories
+        for category in categories[rr_code]:
+            norm_cat = category.strip().lower()
 
+            # Find candidate rows where col0 contains the category text
+            matches = df_raw.index[df_raw[0].str.contains(norm_cat, na=False)].tolist()
+
+            if not matches:
+                print(f"⚠️ Could not find row for '{category}' in {rr_code}")
+                continue
+
+            rownum = matches[0]  # take the first match
+            vals_this_year = []
+            for col, wk in week_cols:
+                try:
+                    idx = df_raw.columns.get_loc(col)
+                    vals_this_year.append(df_raw.iloc[rownum, idx])
+                except Exception:
+                    vals_this_year.append(None)
+
+            df.loc[df["Category"] == category, [wk for _, wk in week_cols]] = vals_this_year
+
+        return df
 
 def fill_from_cn():
     df_raw = pd.read_excel(CN_URL, sheet_name="53 Weeks History", engine='openpyxl')
@@ -321,44 +333,71 @@ rowmap_up = {
     "West Colton, CA": 2755,
     "Entire Railroad": 2756,
 }
-
 # --------------------
 # CATEGORIES (for skeleton building)
 # --------------------
 categories = {
-    "BNSF": list(rowmap_bnsf.keys()),
-    "CSX": list(rowmap_csx.keys()),
-    "NS": list(rowmap_ns.keys()),
-    "UP": list(rowmap_up.keys()),
-    "CNI": ["System", "Box", "Covered Hopper", "Gondola", "Intermodal", "Multilevel", "Open Hopper", "Tank", "Other"],
-    "CPKC": ["System", "Box", "Covered Hopper", "Gondola", "Intermodal", "Multilevel", "Open Hopper", "Tank", "Other"]
+    "BNSF": ["System", "Foreign RR", "Private", "Pct. Private", 
+             "Box", "Covered Hopper", "Gondola", "Intermodal", 
+             "Multilevel", "Open Hopper", "Tank", "Other", "Total",
+             "Manifest", "Coal Unit", "Grain Unit", "All Trains",
+             "Barstow, CA", "Denver, CO", "Fort Worth, TX",
+             "Galesburg, IL", "Kansas City, KS", "Lincoln, NE",
+             "Memphis, TN", "Northtown, MN", "Pasco, WA", 
+             "Tulsa, OK", "Entire Railroad"],
+
+    "CSX": ["System", "Total Cars", "Pct. Private",
+            "Box", "Covered Hopper", "Gondola", "Intermodal",
+            "Multilevel", "Open Hopper", "Tank", "Other", "Total",
+            "Coal", "Crude", "Ethanol", "Grain", "Merch",
+            "Chicago, IL", "Cincinnati, OH", "Baltimore, MD",
+            "Indianapolis, IN", "Jacksonville, FL", "Louisville, KY",
+            "Nashville, TN", "Rocky Mount, NC", "Selkirk, NY",
+            "Toledo, OH", "Waycross, GA"],
+
+    "NS": ["System", "Total Cars", "Box", "Covered Hopper", "Gondola",
+           "Intermodal", "Multilevel", "Open Hopper", "Tank", "Other", "Total",
+           "Manifest", "Coal Unit", "Grain Unit", "All Trains",
+           "Allentown, PA", "Bellevue, OH", "Birmingham, AL", "Chattanooga, TN",
+           "Conway, PA", "Decatur, IL", "Elkhart, IN", "Atlanta, GA",
+           "Linwood, NC", "Macon, GA", "Roanoke, VA", "Entire Railroad"],
+
+    "UP": ["System", "Total Cars", "Box", "Covered Hopper", "Gondola",
+           "Intermodal", "Multilevel", "Open Hopper", "Tank", "Other", "Total",
+           "Manifest", "Coal Unit", "Grain Unit", "All Trains",
+           "Chicago, IL - Proviso", "Fort Worth, TX", "Houston, TX - Englewood",
+           "Livonia, LA", "North Little Rock, AR", "Santa Teresa, NM",
+           "North Platte West, NE", "Pine Bluff, AR", "Roseville, CA",
+           "West Colton, CA", "Entire Railroad"],
+
+    "CNI": ["System", "Box", "Covered Hopper", "Gondola", "Intermodal",
+            "Multilevel", "Open Hopper", "Tank", "Other"],
+
+    "CPKC": ["System", "Box", "Covered Hopper", "Gondola", "Intermodal",
+             "Multilevel", "Open Hopper", "Tank", "Other"]
 }
 
 # --------------------
 # MAIN
-# --------------------
+# -----------------
 def main():
-    ep724_path = download_ep724()
-    cpkc_url = get_cpkc_url()
+        ep724_path = download_ep724()
+        cpkc_url = get_cpkc_url()
 
-    print("📝 Creating output Excel file...")
-    with pd.ExcelWriter(OUTPUT_FILE, engine="xlsxwriter") as writer:
-        print("🚂 Processing BNSF...")
-        fill_from_ep724("BNSF", rowmap_bnsf).to_excel(writer, sheet_name="BNSF", index=False)
-        print("🚂 Processing CSX...")
-        fill_from_ep724("CSX", rowmap_csx).to_excel(writer, sheet_name="CSX", index=False)
-        print("🚂 Processing NS...")
-        fill_from_ep724("NS", rowmap_ns).to_excel(writer, sheet_name="NS", index=False)
-        print("🚂 Processing UP...")
-        fill_from_ep724("UP", rowmap_up).to_excel(writer, sheet_name="UP", index=False)
+        print("📝 Creating output Excel file...")
+        with pd.ExcelWriter(OUTPUT_FILE, engine="xlsxwriter") as writer:
+            print("🚂 Processing BNSF...")
+            fill_from_ep724("BNSF").to_excel(writer, sheet_name="BNSF", index=False)
+            print("🚂 Processing CSX...")
+            fill_from_ep724("CSX").to_excel(writer, sheet_name="CSX", index=False)
+            print("🚂 Processing NS...")
+            fill_from_ep724("NS").to_excel(writer, sheet_name="NS", index=False)
+            print("🚂 Processing UP...")
+            fill_from_ep724("UP").to_excel(writer, sheet_name="UP", index=False)
 
-        print("🚂 Processing CN...")
-        fill_from_cn().to_excel(writer, sheet_name="CN", index=False)
-        print("🚂 Processing CPKC...")
-        fill_from_cpkc(cpkc_url).to_excel(writer, sheet_name="CPKC", index=False)
+            print("🚂 Processing CN...")
+            fill_from_cn().to_excel(writer, sheet_name="CN", index=False)
+            print("🚂 Processing CPKC...")
+            fill_from_cpkc(cpkc_url).to_excel(writer, sheet_name="CPKC", index=False)
 
-    print(f"✅ All carriers written to {OUTPUT_FILE}")
-
-
-if __name__ == "__main__":
-    main()
+        print(f"✅ All carriers written to {OUTPUT_FILE}")

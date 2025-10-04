@@ -54,13 +54,22 @@ def save_bytes(content, filename):
     print(f"✅ Saved: {full}")
     return full
 
-def http_get(url, timeout=None, referer=None):
+def http_get(url, timeout=None, referer=None, retries=3, backoff=5):
     headers = dict(UA)
-    if referer: headers["Referer"] = referer
+    if referer:
+        headers["Referer"] = referer
     t = TIMEOUT_UP if "unionpacific" in url else (timeout or TIMEOUT_DEFAULT)
-    r = requests.get(url, headers=headers, timeout=t, allow_redirects=True)
-    r.raise_for_status()
-    return r
+
+    for attempt in range(1, retries+1):
+        try:
+            r = requests.get(url, headers=headers, timeout=t, allow_redirects=True)
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            if attempt == retries:
+                raise
+            print(f"⚠️ Attempt {attempt} failed for {url}: {e} — retrying in {backoff}s")
+            time.sleep(backoff)
 
 def http_head_ok(url, timeout=None):
     try:
@@ -184,7 +193,7 @@ def download_up():
     saved = []
     for label, url in UP_FILES.items():
         print(f"⬇️ UP {label}")
-        resp = http_get(url, timeout=TIMEOUT_UP)
+        resp = http_get(url, timeout=TIMEOUT_UP, retries=3)
         fname = f"UP_{label}_{datestamp()}.xlsx"
         saved.append(save_bytes(resp.content, fname))
         time.sleep(1)
@@ -204,11 +213,11 @@ def download_ns():
         text = (a.get_text() or "").lower()
         if href.lower().endswith(".xlsx") and "performance" in text:
             url = normalize_url("https://norfolksouthern.investorroom.com", href)
-            resp = http_get(url, referer=NS_REPORTS_PAGE)
+            resp = http_get(url, referer=NS_REPORTS_PAGE, retries=3)
             saved.append(save_bytes(resp.content, f"NS_Performance_{datestamp()}.xlsx"))
         if href.lower().endswith(".pdf") and "carload" in text:
             url = normalize_url("https://norfolksouthern.investorroom.com", href)
-            resp = http_get(url, referer=NS_REPORTS_PAGE)
+            resp = http_get(url, referer=NS_REPORTS_PAGE, retries=3)
             saved.append(save_bytes(resp.content, f"NS_Carloads_{datestamp()}.pdf"))
     if not saved: raise FileNotFoundError("NS reports not found")
     return saved
@@ -222,7 +231,7 @@ def download_bnsf():
     for a in soup.find_all("a", href=True):
         if "current weekly carload report" in (a.get_text() or "").lower():
             url = normalize_url("https://www.bnsf.com", a["href"])
-            resp = http_get(url)
+            resp = http_get(url, retries=3)
             return save_bytes(resp.content, f"BNSF_Carloads_{datestamp()}.pdf")
     raise FileNotFoundError("BNSF weekly carload not found")
 

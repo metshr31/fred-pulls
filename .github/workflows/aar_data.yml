@@ -1,7 +1,7 @@
 name: Download Rail Service Excels
 
 on:
-  workflow_dispatch:   # manual trigger
+  workflow_dispatch:
 
 jobs:
   run-script:
@@ -24,9 +24,15 @@ jobs:
       - name: Run aar_data.py
         run: python aar_data.py
 
+      - name: List downloaded Excel files
+        run: ls -lh *.xlsx || echo "⚠️ No Excel files found"
+
+      - name: Set artifact name with date
+        run: echo "ARTIFACT_NAME=rail_service_excels_$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+
       - name: Upload Excel artifacts
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: rail_service_excels
+          name: ${{ env.ARTIFACT_NAME }}
           path: "*.xlsx"

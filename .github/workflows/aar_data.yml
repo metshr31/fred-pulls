@@ -39,7 +39,7 @@ jobs:
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y ghostscript python3-tk python3-opencv libgl1-mesa-glx
+          sudo apt-get install -y ghostscript python3-tk python3-opencv libgl1
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml pandas openpyxl xlsxwriter camelot-py[cv]
 

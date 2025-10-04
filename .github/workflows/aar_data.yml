@@ -1,7 +1,11 @@
 name: Download Rail Service Excels
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:     # manual trigger
+  schedule:
+    # Thursdays 11am ET -> 15:00 UTC (EDT) / 16:00 UTC (EST)
+    - cron: '0 15 * * 4'
+    - cron: '0 16 * * 4'
 
 jobs:
   run-script:
@@ -11,28 +15,52 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Check Eastern time (run only at 11:00 ET)
+        id: timecheck
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          now = datetime.now(ZoneInfo("America/New_York"))
+          should = (now.weekday() == 3 and now.hour == 11)  # Thursday == 3
+          print(f"Now in ET: {now.isoformat()} -> should_run={should}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"should_run={'true' if should else 'false'}\n")
+          PY
+
       - name: Set up Python
+        if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
+        if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
         run: |
+          sudo apt-get update
+          sudo apt-get install -y ghostscript python3-tk python3-opencv libgl1-mesa-glx
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml
+          pip install requests beautifulsoup4 lxml pandas openpyxl xlsxwriter camelot-py[cv]
 
       - name: Run aar_data.py
+        if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
         run: python aar_data.py
 
-      - name: List downloaded Excel files
-        run: ls -lh *.xlsx || echo "⚠️ No Excel files found"
+      - name: List downloaded files
+        if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
+        run: ls -lh *.xlsx *.pdf || echo "⚠️ No Excel/PDF files found"
 
-      - name: Set artifact name with date
-        run: echo "ARTIFACT_NAME=rail_service_excels_$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+      - name: Set artifact name with date + weekday
+        if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
+        run: echo "ARTIFACT_NAME=rail_service_excels_$(date +'%Y-%m-%d_%a')" >> $GITHUB_ENV
 
-      - name: Upload Excel artifacts
-        if: success()
+      - name: Upload artifacts (Excel + PDF)
+        if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: "*.xlsx"
+          path: |
+            *.xlsx
+            *.pdf
+          retention-days: 14

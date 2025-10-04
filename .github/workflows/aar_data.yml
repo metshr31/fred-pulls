@@ -1,9 +1,9 @@
 name: Download Rail Service Excels
 
 on:
-  workflow_dispatch:     # manual trigger
+  workflow_dispatch:    # allow manual trigger
   schedule:
-    # Thursdays 11am ET -> 15:00 UTC (EDT) / 16:00 UTC (EST)
+    # Thursdays 11:00 AM ET -> 15:00 UTC (EDT) / 16:00 UTC (EST)
     - cron: '0 15 * * 4'
     - cron: '0 16 * * 4'
 
@@ -15,7 +15,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Check Eastern time (run only at 11:00 ET)
+      - name: Check Eastern time (only run at 11:00 ET)
         id: timecheck
         run: |
           python - <<'PY'
@@ -23,7 +23,7 @@ jobs:
           from datetime import datetime
           from zoneinfo import ZoneInfo
           now = datetime.now(ZoneInfo("America/New_York"))
-          should = (now.weekday() == 3 and now.hour == 11)  # Thursday == 3
+          should = (now.weekday() == 3 and now.hour == 11)  # Thursday 11am ET
           print(f"Now in ET: {now.isoformat()} -> should_run={should}")
           with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
               fh.write(f"should_run={'true' if should else 'false'}\n")
@@ -39,9 +39,9 @@ jobs:
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y ghostscript python3-tk python3-opencv libgl1
+          sudo apt-get install -y ghostscript python3-tk python3-opencv libgl1 libglib2.0-0 libsm6 libxrender1 libxext6
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml pandas openpyxl xlsxwriter camelot-py[cv]
+          pip install requests beautifulsoup4 lxml pandas openpyxl xlsxwriter
 
       - name: Run aar_data.py
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}

@@ -200,102 +200,35 @@ def download_up() -> List[str]:
     return saved
 
 # =========================
-# NS (year-aware Weekly Performance; month-aware Carloads w/ fallback)
+# NS (Weekly Performance XLSX + Carloads PDF with regex fallback)
 # =========================
-_WEEKLY_PERF_EXCLUDE = (
-    "monthly_aar",      # monthly reports (wrong)
-    "mapping_key",      # map key (wrong)
-    "revenues",         # revenues analysis (wrong)
-    "investor-weekly-carloads",  # carloads (handled separately)
-)
-
-_MONTH_NAME_PAT = r"(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"
-_DATE_PAT = re.compile(
-    rf"(?:(\d{{4}})[-_]?(?:{_MONTH_NAME_PAT}|(\d{{2}}))[-_]?(\d{{1,2}})|"
-    rf"(?:{_MONTH_NAME_PAT})[-_]?(\d{{1,2}})[-_]?(\d{{4}})|"
-    rf"(\d{{4}})[-_]?(\d{{2}})[-_]?(\d{{2}}))",
-    re.IGNORECASE
-)
-
-def _score_date_from_name(name: str) -> int:
-    """
-    Extract a YYYYMMDD-like score from a filename to pick the 'newest' file.
-    If no date found, return 0.
-    """
-    m = _DATE_PAT.search(name)
-    if not m:
-        return 0
-    text = m.group(0).lower()
-    # Normalize month name to number if present
-    month_map = {
-        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-        "jul": 7, "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12
-    }
-    # Try common forms: YYYY-MM-DD or MONTH-DD-YYYY etc.
-    # 1) yyyy-mon-dd / yyyy-mm-dd
-    ym = re.search(r"(\d{4})[-_]?([a-z]{3,}|[01]?\d)[-_]?([0-3]?\d)", text)
-    if ym:
-        y = int(ym.group(1))
-        mm = ym.group(2)
-        d = int(ym.group(3))
-        mm = int(mm) if mm.isdigit() else month_map.get(mm[:4] if len(mm) > 3 else mm[:3], 0)
-        return y * 10000 + mm * 100 + d
-    # 2) mon-dd-yyyy
-    my = re.search(r"([a-z]{3,})[-_]?([0-3]?\d)[-_]?(\d{4})", text)
-    if my:
-        mm = month_map.get(my.group(1)[:4] if len(my.group(1)) > 3 else my.group(1)[:3], 0)
-        d = int(my.group(2))
-        y = int(my.group(3))
-        return y * 10000 + mm * 100 + d
-    # 3) yyyymmdd
-    ymd = re.search(r"(\d{4})(\d{2})(\d{2})", text)
-    if ymd:
-        return int(ymd.group(1)) * 10000 + int(ymd.group(2)) * 100 + int(ymd.group(3))
-    return 0
-
 def download_ns() -> List[str]:
     """
-    Download Norfolk Southern's WEEKLY Performance Report PDF (not monthly)
-    and the current month's Weekly Carloading Report PDF (with previous-month fallback).
+    Download Norfolk Southern's Weekly Performance Report (XLSX, regex fallback)
+    and the current month's Weekly Carloading Report (PDF, with previous-month fallback).
     """
     r = http_get(NS_REPORTS_PAGE)
     soup = BeautifulSoup(r.text, "html.parser")
     saved = []
 
-    # --- WEEKLY Performance PDF (year-aware, exclude monthly/etc) ---
-    year_str = str(dt.date.today().year)
+    # --- Weekly Performance Report (XLSX with regex fallback) ---
+    perf_link = None
+    regex_perf = re.compile(r"(weekly[-_ ]?performance.*\.xlsx|speed[-_]?dwell[-_]?cars[-_]?on[-_]?line.*\.xlsx)", re.IGNORECASE)
 
-    def is_weekly_perf(href: str, txt: str) -> bool:
-        h = (href or "").lower()
-        t = (txt or "").lower()
-        if not h.endswith(".pdf"):
-            return False
-        if any(bad in h for bad in _WEEKLY_PERF_EXCLUDE):
-            return False
-        # must look like weekly performance
-        cond_perf = ("performance" in h) or ("performance" in t)
-        cond_week = ("weekly" in h) or ("weekly" in t) or ("week ending" in t)
-        # often filenames contain the year we care about
-        cond_year = year_str in h or year_str in t
-        return cond_perf and cond_week and cond_year
-
-    perf_candidates = []
     for a in soup.find_all("a", href=True):
-        href = a["href"]
-        txt = (a.get_text() or "")
-        if is_weekly_perf(href, txt):
-            perf_candidates.append(normalize_url(NS_REPORTS_PAGE, href))
+        href = a["href"].lower()
+        if href.endswith(".xlsx") and regex_perf.search(href):
+            perf_link = normalize_url(NS_REPORTS_PAGE, a["href"])
+            break
 
-    if perf_candidates:
-        # Prefer the one whose filename looks newest by date token
-        best = max(perf_candidates, key=lambda u: _score_date_from_name(os.path.basename(u)))
-        print(f"⬇️ NS Weekly Performance PDF: {best}")
-        resp = http_get(best, referer=NS_REPORTS_PAGE)
-        saved.append(save_bytes(resp.content, f"NS_Performance_{datestamp()}.pdf"))
+    if perf_link:
+        print(f"⬇️ NS Weekly Performance XLSX: {perf_link}")
+        resp = http_get(perf_link, referer=NS_REPORTS_PAGE)
+        saved.append(save_bytes(resp.content, f"NS_Performance_{datestamp()}.xlsx"))
     else:
-        print(f"⚠️ No WEEKLY Performance PDF found for {year_str} (skipping monthly/AAR files)")
+        print("⚠️ No Weekly Performance XLSX found")
 
-    # --- Weekly Carloads PDF (month-aware with previous-month fallback) ---
+    # --- Weekly Carloading PDF (month-aware with fallback) ---
     today = dt.date.today()
     year_str = str(today.year)
     month_now = today.strftime("%B").lower()

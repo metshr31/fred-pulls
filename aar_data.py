@@ -25,7 +25,7 @@ NS_REPORTS_PAGE = "https://norfolksouthern.investorroom.com/weekly-performance-r
 BNSF_REPORTS_PAGE = "https://www.bnsf.com/about-bnsf/financial-information/weekly-carload-reports/"
 DOWNLOAD_FOLDER = os.getenv("STB_LOG_DIR", os.getcwd())
 TIMEOUT_DEFAULT = 20
-TIMEOUT_UP = 60
+TIMEOUT_UP = 60  # UP is slow
 UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) excel-fetcher",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -85,22 +85,139 @@ def normalize_url(base: str, href: str) -> Union[str, None]:
     return urljoin(base, href)
 
 # =========================
-# NS (fixed)
+# STB - EP724
+# =========================
+def get_latest_ep724_url() -> str:
+    r = http_get(STB_URL)
+    soup = BeautifulSoup(r.text, "html.parser")
+    links = [a["href"] for a in soup.find_all("a", href=True) if "EP724" in a["href"] and a["href"].endswith(".xlsx")]
+    if not links: raise FileNotFoundError("No EP724 .xlsx link found")
+    links.sort()
+    return normalize_url("https://www.stb.gov", links[-1])
+
+def download_ep724() -> str:
+    resp = http_get(get_latest_ep724_url())
+    return save_bytes(resp.content, f"EP724_{datestamp()}.xlsx")
+
+# =========================
+# CN
+# =========================
+def download_cn_perf() -> str:
+    resp = http_get(CN_PERF_URL)
+    return save_bytes(resp.content, f"CN_Performance_{datestamp()}.xlsx")
+
+def download_cn_rtm() -> List[str]:
+    r = http_get(CN_METRICS_PAGE)
+    soup = BeautifulSoup(r.text, "html.parser")
+    links = [a["href"] for a in soup.find_all("a", href=True) if a["href"].endswith(".xlsx")]
+    if not links: raise FileNotFoundError("No CN RTM .xlsx link found")
+    saved = []
+    for url in links:
+        url = normalize_url("https://www.cn.ca", url)
+        fname = url.split("/")[-1]
+        print(f"⬇️ CN RTM {fname}")
+        resp = http_get(url)
+        saved.append(save_bytes(resp.content, f"CN_RTM_{datestamp()}_{fname}"))
+        time.sleep(0.5)
+    return saved
+
+# =========================
+# CPKC
+# =========================
+def _discover_cpkc_cdn_url(filename_pattern: str, max_back_days: int) -> str:
+    today = dt.date.today()
+    for delta in range(max_back_days):
+        d = today - dt.timedelta(days=delta)
+        folder = d.strftime("%Y/%m/%d")
+        url = f"{CPKC_CDN_BASE}/{folder}/{filename_pattern}"
+        if http_head_ok(url):
+            return url
+    raise FileNotFoundError(f"CPKC file ({filename_pattern}) not found in last {max_back_days} days.")
+
+def download_cpkc_53week() -> str:
+    url = _discover_cpkc_cdn_url(CPKC_53WEEK_FILENAME, 14)
+    resp = http_get(url)
+    return save_bytes(resp.content, f"CPKC_53_Week_{datestamp()}.xlsx")
+
+def download_cpkc_rtm() -> str:
+    today = dt.date.today()
+    year_filename = f"CPKC-Weekly-RTMs-and-Carloads-{today.year}.xlsx"
+    url = _discover_cpkc_cdn_url(year_filename, 14)
+    resp = http_get(url)
+    return save_bytes(resp.content, f"CPKC_Weekly_RTM_{datestamp()}.xlsx")
+
+# =========================
+# CSX
+# =========================
+def _iso_week_year(date_obj: dt.date) -> tuple[int, int]:
+    iso = date_obj.isocalendar()
+    return iso[0], iso[1]
+
+def _csx_candidate_filenames(year: int, week: int) -> List[str]:
+    return [
+        f"Historical_Data_Week_{week}_{year}.xlsx",
+        f"Combined-Intermodal-and-Carload-TPC-Week-1-2025-Week-{week}-{year}.xlsx",
+    ]
+
+def discover_csx_url(max_back_days: int = 10) -> str:
+    today = dt.date.today()
+    last_week_end = today - dt.timedelta(days=today.weekday() + 2)
+    year, week = _iso_week_year(last_week_end)
+    for delta in range(max_back_days):
+        d = today - dt.timedelta(days=delta)
+        folder = d.strftime("%Y/%m/%d")
+        for fname in _csx_candidate_filenames(year, week):
+            url = f"{CSX_CDN_BASE}/{folder}/{fname}"
+            if http_head_ok(url):
+                print(f"✅ CSX URL found via CDN: {url}")
+                return url
+    r = http_get(CSX_METRICS_PAGE, retries=1)
+    soup = BeautifulSoup(r.text, "html.parser")
+    links = [a["href"] for a in soup.find_all("a", href=True) if a["href"].endswith(".xlsx")]
+    for u in links:
+        u = normalize_url("https://investors.csx.com", u)
+        if u and http_head_ok(u):
+            return u
+    raise FileNotFoundError("CSX Excel not found")
+
+def download_csx() -> str:
+    url = discover_csx_url()
+    resp = http_get(url)
+    server_name = url.rstrip("/").rsplit("/", 1)[-1]
+    fname = sanitize_filename(f"CSX_{datestamp()}_{server_name}")
+    return save_bytes(resp.content, fname)
+
+# =========================
+# UP
+# =========================
+def download_up() -> List[str]:
+    saved = []
+    for label, url in UP_STATIC.items():
+        print(f"⬇️ UP {label}")
+        resp = http_get(url, timeout=TIMEOUT_UP, retries=3)
+        saved.append(save_bytes(resp.content, f"UP_{label}_{datestamp()}.xlsx"))
+        time.sleep(0.5)
+    return saved
+
+# =========================
+# NS (year + month-aware with fallback)
 # =========================
 def download_ns() -> List[str]:
     """
-    Download Norfolk Southern's Weekly Performance Report (PDF)
-    and the current month's Weekly Carloading Report (PDF).
+    Download Norfolk Southern's Weekly Performance Report (PDF, year-aware)
+    and the current month's Weekly Carloading Report (PDF, month-aware with fallback).
     """
     r = http_get(NS_REPORTS_PAGE)
     soup = BeautifulSoup(r.text, "html.parser")
     saved = []
 
-    # --- Weekly Performance Report (look for 2025_NS_Monthly_AAR_Performance.pdf) ---
+    year_str = str(dt.date.today().year)
+
+    # --- Performance PDF (year-aware) ---
     perf_link = None
     for a in soup.find_all("a", href=True):
         href = a["href"].lower()
-        if href.endswith("2025_ns_monthly_aar_performance.pdf"):
+        if href.endswith(f"{year_str}_ns_monthly_aar_performance.pdf"):
             perf_link = normalize_url(NS_REPORTS_PAGE, a["href"])
             break
     if perf_link:
@@ -108,32 +225,53 @@ def download_ns() -> List[str]:
         resp = http_get(perf_link, referer=NS_REPORTS_PAGE)
         saved.append(save_bytes(resp.content, f"NS_Performance_{datestamp()}.pdf"))
     else:
-        print("⚠️ No Performance Report PDF found")
+        print(f"⚠️ No Performance Report PDF found for {year_str}")
 
-    # --- Weekly Carloading Reports (look for investor-weekly-carloads-<month>-2025.pdf) ---
+    # --- Carloads PDF (month-aware with fallback) ---
+    today = dt.date.today()
+    month_str = today.strftime("%B").lower()
     carload_link = None
+
+    # Try current month first
     for a in soup.find_all("a", href=True):
         href = a["href"].lower()
-        if "investor-weekly-carloads-" in href and href.endswith("2025.pdf"):
+        if f"investor-weekly-carloads-{month_str}-{year_str}.pdf" in href:
             carload_link = normalize_url(NS_REPORTS_PAGE, a["href"])
             break
+
+    # If not found, fallback to previous month
+    if not carload_link:
+        prev_month = (today.replace(day=1) - dt.timedelta(days=1)).strftime("%B").lower()
+        for a in soup.find_all("a", href=True):
+            href = a["href"].lower()
+            if f"investor-weekly-carloads-{prev_month}-{year_str}.pdf" in href:
+                carload_link = normalize_url(NS_REPORTS_PAGE, a["href"])
+                break
+
     if carload_link:
         print(f"⬇️ NS Carloading PDF: {carload_link}")
         resp = http_get(carload_link, referer=NS_REPORTS_PAGE)
         saved.append(save_bytes(resp.content, f"NS_Carloads_{datestamp()}.pdf"))
     else:
-        print("⚠️ No Carloading Report PDF found")
+        print(f"⚠️ No Carloading Report PDF found for {month_str}/{year_str} or fallback")
 
     if not saved:
         raise FileNotFoundError("NS reports not found")
     return saved
 
 # =========================
-# (Other railroads unchanged – CN, CPKC, CSX, UP, BNSF)
+# BNSF
 # =========================
-# ... your existing functions for download_ep724, download_cn_perf,
-# download_cn_rtm, download_cpkc_53week, download_cpkc_rtm, download_csx,
-# download_up, download_bnsf remain here ...
+def download_bnsf() -> str:
+    r = http_get(BNSF_REPORTS_PAGE)
+    soup = BeautifulSoup(r.text, "html.parser")
+    for a in soup.find_all("a", href=True):
+        txt = (a.get_text() or "").lower()
+        if "carload" in txt and a["href"].lower().endswith(".pdf"):
+            url = normalize_url("https://www.bnsf.com", a["href"])
+            resp = http_get(url, retries=3)
+            return save_bytes(resp.content, f"BNSF_Carloads_{datestamp()}.pdf")
+    raise FileNotFoundError("BNSF weekly carload PDF not found")
 
 # =========================
 # Main
@@ -142,8 +280,15 @@ def download_all():
     print(f"📂 Download folder: {DOWNLOAD_FOLDER}")
     fetched: List[str] = []
     tasks = [
+        ("EP724 (STB)", download_ep724),
+        ("CN Performance", download_cn_perf),
+        ("CN RTM", download_cn_rtm),
+        ("CPKC 53-week", download_cpkc_53week),
+        ("CPKC Weekly RTM", download_cpkc_rtm),
+        ("CSX", download_csx),
+        ("UP", download_up),
         ("NS", download_ns),
-        # add the other carriers here if you want them to run as well
+        ("BNSF", download_bnsf),
     ]
     for name, fn in tasks:
         try:

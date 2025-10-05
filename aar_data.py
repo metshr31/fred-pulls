@@ -25,7 +25,7 @@ NS_REPORTS_PAGE = "https://norfolksouthern.investorroom.com/weekly-performance-r
 BNSF_REPORTS_PAGE = "https://www.bnsf.com/about-bnsf/financial-information/weekly-carload-reports/"
 DOWNLOAD_FOLDER = os.getenv("STB_LOG_DIR", os.getcwd())
 TIMEOUT_DEFAULT = 20
-TIMEOUT_UP = 60  # UP is slow
+TIMEOUT_UP = 60 # UP is slow
 UA = {
 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) excel-fetcher",
 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -269,48 +269,70 @@ def download_up() -> List[str]:
     return saved
 
 # =========================
-# NS — Excel + PDF (normalize & fetch latest)
+# NS — PDF only (normalize & fetch latest)
 # =========================
 def download_ns() -> List[str]:
-    """Scrape NS page for the latest Performance (.xlsx) and Carloads (.pdf) and download both."""
+    """
+    Scrape NS page for the latest Performance (.pdf) and Carloads (.pdf) and download both.
+    
+    This function has been corrected to search for PDF files for both reports, 
+    as requested by the user.
+    """
     r = http_get(NS_REPORTS_PAGE)
     soup = BeautifulSoup(r.text, "html.parser")
     anchors = soup.find_all("a", href=True)
-
-    xlsx_links = []
-    pdf_links = []
-
+    
+    # Separate lists for the two required PDF types
+    performance_pdf_links = []
+    carloads_pdf_links = []
+    
+    # Filter links for PDFs based on keywords
     for a in anchors:
         href = a.get("href")
         text = (a.get_text() or "").lower()
-        if not href: 
+        
+        # Only look at links that end with .pdf
+        if not href or not href.lower().endswith(".pdf"): 
             continue
         
-        # Ensure only current reports are considered (they are listed newest first)
         url = normalize_url("https://norfolksouthern.investorroom.com", href)
-
-        if href.lower().endswith(".xlsx") and "performance" in text:
-            xlsx_links.append(url)
-
-        if href.lower().endswith(".pdf") and ("carload" in text or "carloading" in text):
-            pdf_links.append(url)
-
+        
+        # Performance Report PDF
+        if "performance" in text:
+            # Append only if it is a PDF and contains 'performance' in the link text
+            performance_pdf_links.append(url)
+            
+        # Carloads Report PDF
+        elif "carload" in text or "carloading" in text:
+            # Append only if it is a PDF and contains 'carload(ing)' in the link text
+            carloads_pdf_links.append(url)
+            
     saved = []
-
+    
+    # Download the latest Performance PDF
     # NS reports are listed newest-first, so the first one found is the latest.
-    if xlsx_links:
-        latest_xlsx = xlsx_links[0]
-        resp = http_get(latest_xlsx, referer=NS_REPORTS_PAGE, retries=3)
-        saved.append(save_bytes(resp.content, f"NS_Performance_{datestamp()}.xlsx"))
-
-    if pdf_links:
-        latest_pdf = pdf_links[0]
+    if performance_pdf_links:
+        latest_pdf = performance_pdf_links[0]
+        print(f"⬇️ NS Performance PDF: {latest_pdf.split('/')[-1]}")
         resp = http_get(latest_pdf, referer=NS_REPORTS_PAGE, retries=3)
-        saved.append(save_bytes(resp.content, f"NS_Carloads_{datestamp()}.pdf"))
+        saved.append(save_bytes(resp.content, f"NS_Performance_Report_{datestamp()}.pdf"))
+    else:
+        print("⚠️ Performance Report PDF link not found.")
+    
+    # Download the latest Carloads PDF
+    if carloads_pdf_links:
+        latest_pdf = carloads_pdf_links[0]
+        print(f"⬇️ NS Carloads PDF: {latest_pdf.split('/')[-1]}")
+        resp = http_get(latest_pdf, referer=NS_REPORTS_PAGE, retries=3)
+        saved.append(save_bytes(resp.content, f"NS_Carloads_Report_{datestamp()}.pdf"))
+    else:
+        print("⚠️ Carloads Report PDF link not found.")
 
     if not saved: 
         raise FileNotFoundError("NS reports not found")
+        
     return saved
+
 
 # =========================
 # BNSF — Current Weekly Carload (PDF)

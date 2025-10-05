@@ -147,7 +147,7 @@ def download_cpkc_rtm() -> str:
     return save_bytes(resp.content, f"CPKC_Weekly_RTM_{datestamp()}.xlsx")
 
 # =========================
-# CSX
+# CSX Excel
 # =========================
 def _iso_week_year(date_obj: dt.date) -> tuple[int, int]:
     iso = date_obj.isocalendar()
@@ -188,6 +188,36 @@ def download_csx() -> str:
     return save_bytes(resp.content, fname)
 
 # =========================
+# CSX AAR (PDF)
+# =========================
+def download_csx_aar() -> str:
+    """
+    Download CSX Weekly AAR PDF based on year/week pattern.
+    Example: https://s2.q4cdn.com/.../2025/2025-Week-39-AAR.pdf
+    """
+    today = dt.date.today()
+    iso_year, iso_week, _ = today.isocalendar()
+
+    url = f"{CSX_CDN_BASE}/volume_trends/{iso_year}/{iso_year}-Week-{iso_week}-AAR.pdf"
+    tried_urls = [url]
+
+    if not http_head_ok(url):
+        prev_week = today - dt.timedelta(weeks=1)
+        prev_year, prev_weeknum, _ = prev_week.isocalendar()
+        url = f"{CSX_CDN_BASE}/volume_trends/{prev_year}/{prev_year}-Week-{prev_weeknum}-AAR.pdf"
+        tried_urls.append(url)
+
+    if http_head_ok(url):
+        print(f"⬇️ CSX AAR PDF: {url}")
+        resp = http_get(url)
+        week_match = re.search(r"Week-(\d+)", url)
+        week_str = f"Week{week_match.group(1)}" if week_match else "UnknownWeek"
+        fname = sanitize_filename(f"CSX_AAR_{datestamp()}_{week_str}.pdf")
+        return save_bytes(resp.content, fname)
+    else:
+        raise FileNotFoundError(f"CSX AAR file not found. Tried: {tried_urls}")
+
+# =========================
 # UP
 # =========================
 def download_up() -> List[str]:
@@ -200,18 +230,13 @@ def download_up() -> List[str]:
     return saved
 
 # =========================
-# NS (Weekly Performance XLSX + Carloads PDF with regex fallback)
+# NS
 # =========================
 def download_ns() -> List[str]:
-    """
-    Download Norfolk Southern's Weekly Performance Report (XLSX, regex fallback)
-    and the current month's Weekly Carloading Report (PDF, with previous-month fallback).
-    """
     r = http_get(NS_REPORTS_PAGE)
     soup = BeautifulSoup(r.text, "html.parser")
     saved = []
 
-    # --- Weekly Performance Report (XLSX with regex fallback) ---
     perf_link = None
     regex_perf = re.compile(r"(weekly[-_ ]?performance.*\.xlsx|speed[-_]?dwell[-_]?cars[-_]?on[-_]?line.*\.xlsx)", re.IGNORECASE)
 
@@ -228,7 +253,6 @@ def download_ns() -> List[str]:
     else:
         print("⚠️ No Weekly Performance XLSX found")
 
-    # --- Weekly Carloading PDF (month-aware with fallback) ---
     today = dt.date.today()
     year_str = str(today.year)
     month_now = today.strftime("%B").lower()
@@ -281,6 +305,7 @@ def download_all():
         ("CPKC 53-week", download_cpkc_53week),
         ("CPKC Weekly RTM", download_cpkc_rtm),
         ("CSX", download_csx),
+        ("CSX AAR", download_csx_aar),  # <-- NEW
         ("UP", download_up),
         ("NS", download_ns),
         ("BNSF", download_bnsf),

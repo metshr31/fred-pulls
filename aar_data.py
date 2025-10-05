@@ -7,6 +7,14 @@ import requests
 from bs4 import BeautifulSoup
 from typing import List
 
+# << NEW PLAYWRIGHT INTEGRATION >>
+try:
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    # Set a flag if Playwright isn't installed
+    PLAYWRIGHT_AVAILABLE = False
+
 # =========================
 # Config
 # =========================
@@ -32,7 +40,7 @@ BNSF_REPORTS_PAGE = "https://www.bnsf.com/about-bnsf/financial-information/weekl
 
 DOWNLOAD_FOLDER = os.getenv("STB_LOG_DIR", os.getcwd())
 TIMEOUT_DEFAULT = 20
-TIMEOUT_UP = 60  # UP is slow
+TIMEOUT_UP = 60 # UP is slow
 
 UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) excel-fetcher",
@@ -162,13 +170,13 @@ def download_cpkc_rtm():
     return save_bytes(resp.content, f"CPKC_Weekly_RTM_{datestamp()}.xlsx")
 
 # =========================
-# CSX — CDN-first (working), page as fallback
+# CSX — CDN-first (working), page as fallback (Excel)
 # =========================
 def _iso_week_year(date_obj): 
     iso = date_obj.isocalendar(); return iso[0], iso[1]
 
 def _csx_candidate_filenames(year: int, week: int) -> List[str]:
-    """Provides filename candidates including future-proofed year references."""
+    """Provides Excel filename candidates including future-proofed year references."""
     # Note: These names are based on observed patterns and may need yearly adjustment
     return [
         f"Historical_Data_Week_{week}_{year}.xlsx",
@@ -211,11 +219,75 @@ def discover_csx_url(max_back_days=10):
     raise FileNotFoundError("CSX Excel not found (CDN + fallback both failed).")
 
 def download_csx():
+    """Downloads the CSX Weekly Performance Excel file."""
     url = discover_csx_url()
     resp = http_get(url)
     server_name = url.rstrip("/").rsplit("/", 1)[-1]
-    fname = sanitize_filename(f"CSX_{datestamp()}_{server_name}")
+    fname = sanitize_filename(f"CSX_Performance_{datestamp()}_{server_name}")
     return save_bytes(resp.content, fname)
+
+# << NEW PLAYWRIGHT INTEGRATION >>
+def download_csx_aar_reports():
+    """
+    Uses Playwright to scrape the dynamically loaded Weekly Carload Report (PDF) links 
+    from the CSX Investor Relations page and downloads the latest one.
+    """
+    if not PLAYWRIGHT_AVAILABLE:
+        print("❌ Playwright not installed. Skipping CSX AAR PDF download.")
+        print("   Run: pip install playwright requests && playwright install")
+        return []
+
+    print("🚀 Launching headless browser to fetch CSX AAR PDF links...")
+    carload_links = []
+    
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            page.goto(CSX_METRICS_PAGE, wait_until="networkidle") 
+            
+            # Wait for the dynamic 'Weekly Carload Reports' section to load
+            page.wait_for_selector('h2:has-text("Weekly Carload Reports")', timeout=15000)
+            print("✅ Dynamic content loaded.")
+            
+            # Find the main container for the reports and get all link elements
+            reports_container = page.locator('div.module.module-metrics-volume').first
+            link_elements = reports_container.locator('a:has-text("AAR(opens in new window)")').all()
+
+            for element in link_elements:
+                link_text = element.inner_text().replace('(opens in new window)', '').strip()
+                link_url = element.get_attribute('href')
+
+                # Handle relative URLs
+                if link_url and link_url.startswith('/'):
+                    link_url = f"https://investors.csx.com{link_url}"
+
+                if link_url:
+                    carload_links.append((link_text, link_url))
+
+            browser.close()
+            
+    except Exception as e:
+        print(f"❌ An error occurred during Playwright scraping: {e}")
+        return []
+
+    if not carload_links:
+        print("⚠️ Found no CSX AAR PDF links via Playwright.")
+        return []
+    
+    # Download the latest report (it's usually the first one in the list)
+    latest_name, latest_url = carload_links[0]
+    
+    print(f"⬇️ Downloading latest CSX AAR PDF: {latest_name}")
+    
+    try:
+        # Use existing http_get for the final download
+        resp = http_get(latest_url, retries=3) 
+        filename = sanitize_filename(f"CSX_AAR_Carloads_{datestamp()}_{latest_name}.pdf")
+        return [save_bytes(resp.content, filename)]
+    except Exception as e:
+        print(f"❌ Failed to download CSX AAR PDF from {latest_url}: {e}")
+        return []
 
 # =========================
 # UP — Scrape the metrics page for current links (FIXED)
@@ -333,7 +405,10 @@ def main():
         ("CN RTM", download_cn_rtm),
         ("CPKC 53-week", download_cpkc_53week),
         ("CPKC Weekly RTM", download_cpkc_rtm),
-        ("CSX", download_csx),
+        # CSX Excel is first
+        ("CSX Performance XLSX", download_csx),
+        # << NEW PLAYWRIGHT INTEGRATION >> CSX AAR PDF is new
+        ("CSX AAR Carloads PDF", download_csx_aar_reports), 
         ("UP", download_up),
         ("NS", download_ns),
         ("BNSF", download_bnsf),
@@ -343,13 +418,13 @@ def main():
             print(f"\n--- Starting {name} ---")
             result = fn()
             if isinstance(result, list): fetched.extend(result)
-            else: fetched.append(result)
+            elif result: fetched.append(result) # Only append if the result is not None/empty
         except Exception as e:
             print(f"❌ {name} failed: {e}")
 
     print("\n" + "="*30)
     if fetched:
-        print("✅ ALL TARGETED FILES DOWNLOADED:")
+        print(f"✅ ALL TARGETED FILES DOWNLOADED ({len(fetched)} total):")
         for f in fetched: print(" •", f)
     else:
         print("❌ NO files downloaded.")

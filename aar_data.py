@@ -8,8 +8,8 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
 
 # === CONFIG ===
-# Increased timeout to 90 seconds to handle slow servers (Union Pacific issue)
-TIMEOUT = 90
+# Timeout reverted to the original 15 seconds
+TIMEOUT = 15
 UA = {"User-Agent": "Mozilla/5.0 excel-fetcher"}
 # Environment variable to control the download location
 DOWNLOAD_FOLDER = os.getenv("RAIL_METRICS_DIR", os.getcwd()) 
@@ -161,43 +161,10 @@ class CSXDownloader(RailDownloader):
         fname = f"CSX_Weekly_Metrics_{datestamp()}.xlsx" 
         return save_bytes(resp.content, fname)
 
-# === UP (Union Pacific) ===
-class UPDownloader(RailDownloader):
-    # Main metrics page used to find the latest file link
-    METRICS_PAGE = "https://investors.unionpacific.com/performance/performance-data/default.aspx"
-    
-    def download(self):
-        self.log("Scraping Weekly UP Metrics")
-        r = http_get(self.METRICS_PAGE)
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        # Find all .xlsx links, common links are under 'static-files'
-        links = [
-            a["href"] 
-            for a in soup.find_all("a", href=True) 
-            if a["href"].endswith(".xlsx") and "static-files" in a["href"]
-        ]
-        
-        if not links:
-            raise FileNotFoundError("No UP .xlsx link found.")
-        
-        # Use the most recently posted link (often the last one)
-        url = links[-1] 
-        # UP links are usually absolute, but check for safety
-        if url.startswith("/"): url = "https://investors.unionpacific.com" + url
-
-        self.log(f"Found: {url}")
-        
-        # Note: The retry logic is implicitly handled by the increased global TIMEOUT
-        resp = http_get(url) 
-        
-        fname = f"UP_Weekly_Metrics_{datestamp()}.xlsx" 
-        return save_bytes(resp.content, fname)
-
 # === MAIN EXECUTION ===
 def run_tasks(args):
     
-    # 1. Validation for DOWNLOAD_FOLDER writability
+    # Validation for DOWNLOAD_FOLDER writability
     if not os.path.exists(DOWNLOAD_FOLDER) or not os.access(DOWNLOAD_FOLDER, os.W_OK):
         logging.error(f"❌ Download folder '{DOWNLOAD_FOLDER}' is not accessible or writable. Aborting.")
         return
@@ -212,7 +179,6 @@ def run_tasks(args):
         cp = CPKCDownloader("CPKC")
         tasks.extend([cp.download_53week, cp.download_rtm])
     if args.all or args.csx: tasks.append(CSXDownloader("CSX").download)
-    if args.all or args.up: tasks.append(UPDownloader("UP").download) # ADDED UP DOWNLOADER
 
     fetched = []
     with ThreadPoolExecutor() as executor:
@@ -242,19 +208,19 @@ def run_tasks(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Rail Metrics Scraper. Downloads performance spreadsheets from STB, CN, CPKC, CSX, and UP. "
+        description="Rail Metrics Scraper. Downloads performance spreadsheets from STB, CN, CPKC, and CSX. "
                     "Set the RAIL_METRICS_DIR environment variable to specify the download folder (defaults to current directory)."
     )
-    parser.add_argument("--all", action="store_true", help="Download all reports (STB, CN, CPKC, CSX, UP)")
+    parser.add_argument("--all", action="store_true", help="Download all reports (STB, CN, CPKC, CSX)")
     parser.add_argument("--stb", action="store_true", help="Download STB EP724")
     parser.add_argument("--cn", action="store_true", help="Download CN Performance and RTM")
     parser.add_argument("--cpkc", action="store_true", help="Download CPKC 53-week and RTM")
     parser.add_argument("--csx", action="store_true", help="Download CSX report")
-    parser.add_argument("--up", action="store_true", help="Download Union Pacific report") # ADDED UP ARGUMENT
     args = parser.parse_args()
     
-    if not (args.stb or args.cn or args.cpkc or args.csx or args.up or args.all):
-        logging.error("❌ No rail source selected. Use --all or one or more source flags (e.g., --stb --up).")
+    # The check now only uses the original arguments
+    if not (args.stb or args.cn or args.cpkc or args.csx or args.all):
+        logging.error("❌ No rail source selected. Use --all or one or more source flags (e.g., --stb --cn).")
         parser.print_help()
     else:
         logging.info(f"📂 Download folder: {DOWNLOAD_FOLDER}")

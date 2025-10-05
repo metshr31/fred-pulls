@@ -1,56 +1,34 @@
-# aar_data.py
 import os
 import re
-import time
 import datetime as dt
 import requests
 from bs4 import BeautifulSoup
-from typing import List
 
-# << NEW PLAYWRIGHT INTEGRATION >>
-try:
-    from playwright.sync_api import sync_playwright
-    PLAYWRIGHT_AVAILABLE = True
-except ImportError:
-    # Set a flag if Playwright isn't installed
-    PLAYWRIGHT_AVAILABLE = False
-
-# =========================
-# Config
-# =========================
+# === CONFIG ===
+# URL for the Surface Transportation Board (STB) Rail Service Data
 STB_URL = "https://www.stb.gov/reports-data/rail-service-data/"
+# Direct URL for CN's main performance spreadsheet (often stable)
 CN_PERF_URL = "https://www.cn.ca/-/media/files/investors/investor-performance-measures/perf_measures_en.xlsx"
+# CN's public metrics page (for RTMs/Carloads links)
 CN_METRICS_PAGE = "https://www.cn.ca/en/investors/key-weekly-metrics/"
 
-# CSX — keep working CDN-first logic, page only as fallback
+# CSX Investor Relations page (used for fallback link scraping)
 CSX_METRICS_PAGE = "https://investors.csx.com/metrics/default.aspx"
+# Base URL for CSX's CDN where weekly reports are hosted
 CSX_CDN_BASE = "https://s2.q4cdn.com/859568992/files/doc_downloads"
 
-# CPKC
+# Base URL for CPKC's CDN where weekly reports are hosted
 CPKC_CDN_BASE = "https://s21.q4cdn.com/736796105/files/doc_downloads"
+# Standardized part of the CPKC 53-week report filename
 CPKC_53WEEK_FILENAME = "CPKC-53-Week-Railway-Performance-Report.xlsx"
 
-# UP — NEW: Avoid static files; use page scrape as static files break often
-UP_METRICS_PAGE = "https://investor.unionpacific.com/key-performance-metrics/"
-UP_STATIC = {} # Removed old URLs, now using page scrape
-
-# NS + BNSF
-NS_REPORTS_PAGE = "https://norfolksouthern.investorroom.com/weekly-performance-reports"
-BNSF_REPORTS_PAGE = "https://www.bnsf.com/about-bnsf/financial-information/weekly-carload-reports/"
-
+# Set download directory based on environment variable or current working directory
 DOWNLOAD_FOLDER = os.getenv("STB_LOG_DIR", os.getcwd())
-TIMEOUT_DEFAULT = 20
-TIMEOUT_UP = 60 # UP is slow
+TIMEOUT = 15
+# User Agent for requests (identifying the script)
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) excel-fetcher"}
 
-UA = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) excel-fetcher",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-}
-
-# =========================
-# Utilities
-# =========================
+# --- Utility functions ---
 def ensure_dir(path): os.makedirs(path, exist_ok=True)
 def datestamp(): return dt.date.today().strftime("%Y-%m-%d")
 def sanitize_filename(name): return re.sub(r"[^\w\-.]+", "_", name)
@@ -62,373 +40,249 @@ def save_bytes(content, filename):
     print(f"✅ Saved: {full}")
     return full
 
-def http_get(url, timeout=None, referer=None, retries=3, backoff=5):
-    headers = dict(UA)
-    if referer: headers["Referer"] = referer
-    t = TIMEOUT_UP if "unionpacific.com" in url else (timeout or TIMEOUT_DEFAULT)
-    for attempt in range(1, retries+1):
-        try:
-            r = requests.get(url, headers=headers, timeout=t, allow_redirects=True)
-            r.raise_for_status()
-            return r
-        except Exception as e:
-            if attempt == retries:
-                raise
-            print(f"⚠️ Attempt {attempt} failed for {url}: {e} — retrying in {backoff}s")
-            time.sleep(backoff)
+def http_get(url):
+    r = requests.get(url, headers=UA, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r
 
-def http_head_ok(url, timeout=None):
+def http_head_ok(url):
+    """Checks if a URL exists and returns a non-HTML file (or any 200 OK non-HTML)."""
     try:
-        r = requests.head(url, headers=UA, timeout=timeout or TIMEOUT_DEFAULT, allow_redirects=True)
-        ctype = r.headers.get("Content-Type", "").lower()
-        return r.status_code == 200 and "text/html" not in ctype
+        r = requests.head(url, headers=UA, timeout=TIMEOUT, allow_redirects=True)
+        # Check for 200 OK and ensure it's not a generic redirect to an HTML error page
+        if r.status_code == 200 and "text/html" not in r.headers.get("Content-Type", "").lower():
+            return True
     except requests.RequestException:
+        # Ignore network/timeout errors
         return False
+    return False
 
-def normalize_url(base, href):
-    if not href: return None
-    href = href.strip()
-    if href.startswith("//"): return "https:" + href
-    if href.startswith("http"): return href
-    if href.startswith("/"): return base.rstrip("/") + href
-    return base.rstrip("/") + "/" + href
-
-def _discover_cpkc_cdn_url(filename_pattern: str, max_back_days: int) -> str:
-    """Helper to find CPKC files across recent date-based CDN folders."""
-    today = dt.date.today()
-    for delta in range(max_back_days):
-        d = today - dt.timedelta(days=delta)
-        folder = d.strftime("%Y/%m/%d")
-        # Handle filename pattern substitution if needed (e.g., for year)
-        filename = filename_pattern.replace("{year}", str(d.year))
-        url = f"{CPKC_CDN_BASE}/{folder}/{filename}"
-        if http_head_ok(url): 
-            return url
-    raise FileNotFoundError(f"CPKC file matching '{filename_pattern}' not found in last {max_back_days} days.")
-
-# =========================
-# STB
-# =========================
+# --------------------------
+# === EP724 (STB) ===
+# --------------------------
 def get_latest_ep724_url():
+    """Scrapes the STB page for the latest EP724 .xlsx link."""
     r = http_get(STB_URL)
     soup = BeautifulSoup(r.text, "html.parser")
+    # Find all links containing "EP724" and ending in ".xlsx"
     links = [a["href"] for a in soup.find_all("a", href=True) if "EP724" in a["href"] and a["href"].endswith(".xlsx")]
-    if not links: raise FileNotFoundError("No EP724 .xlsx link found")
+    
+    if not links: 
+        raise FileNotFoundError("No EP724 .xlsx link found on STB page.")
+    
+    # Assuming the latest file has the alphabetically largest name/date
     links.sort()
     url = links[-1]
+    
+    # Construct absolute URL if it's relative
     if not url.startswith("http"): url = "https://www.stb.gov" + url
     return url
 
 def download_ep724():
-    resp = http_get(get_latest_ep724_url())
-    return save_bytes(resp.content, f"EP724_{datestamp()}.xlsx")
+    """Downloads the latest EP724 data file."""
+    print("\n--- Scraping STB EP724 ---")
+    url = get_latest_ep724_url()
+    print(f"⬇️ EP724 found at {url}")
+    resp = http_get(url)
+    fname = f"EP724_{datestamp()}.xlsx"
+    return save_bytes(resp.content, fname)
 
-# =========================
-# CN
-# =========================
+# --------------------------
+# === CN Performance ===
+# --------------------------
 def download_cn_perf():
+    """Downloads the static, main CN Performance Report XLSX file."""
+    print("\n--- Scraping CN Performance (Direct Link) ---")
     resp = http_get(CN_PERF_URL)
-    return save_bytes(resp.content, f"CN_Performance_{datestamp()}.xlsx")
+    fname = f"CN_Performance_{datestamp()}.xlsx"
+    return save_bytes(resp.content, fname)
 
+# --------------------------
+# === CN RTM Summary ===
+# --------------------------
 def download_cn_rtm():
+    """Scrapes the CN metrics page for all current RTM/Carload XLSX links."""
+    print("\n--- Scraping CN RTM (Metrics Page) ---")
     r = http_get(CN_METRICS_PAGE)
     soup = BeautifulSoup(r.text, "html.parser")
+    # Find all XLSX links on the page
     links = [a["href"] for a in soup.find_all("a", href=True) if a["href"].endswith(".xlsx")]
-    if not links: raise FileNotFoundError("No CN RTM .xlsx link found")
+    
+    if not links: 
+        raise FileNotFoundError("No CN RTM .xlsx link found on metrics page.")
+    
     saved = []
     for url in links:
-        url = normalize_url("https://www.cn.ca", url)
-        fname = url.split("/")[-1]
-        # Skip duplicate or non-weekly files if possible
-        if "performance" in fname.lower(): continue 
-        print(f"⬇️ CN RTM {fname}")
-        resp = http_get(url)
-        # Use filename from URL if possible, otherwise use a generic name
-        base_name = re.sub(r"[\d\-]+", "", fname).strip(".-_").replace(".xlsx", "")
-        saved.append(save_bytes(resp.content, f"CN_RTM_{datestamp()}_{base_name}.xlsx"))
+        # Normalize relative URLs
+        if url.startswith("//"): url = "https:" + url
+        elif url.startswith("/"): url = "https://www.cn.ca" + url
+            
+        fname_base = url.split("/")[-1]
+        print(f"⬇️ Downloading CN RTM {fname_base}")
+        try:
+            resp = http_get(url)
+            # Add date and the base file name to prevent overwriting
+            custom_name = f"CN_RTM_{datestamp()}_{fname_base}"
+            saved.append(save_bytes(resp.content, custom_name))
+        except Exception as e:
+             print(f"❌ Failed to download {url}: {e}")
+             
+    if not saved:
+        raise Exception("CN RTM links were found but failed to download.")
     return saved
 
-# =========================
-# CPKC
-# =========================
+# --------------------------
+# === CPKC (Canadian Pacific Kansas City) ===
+# --------------------------
+
 def discover_cpkc_53week_url():
-    # Search last 14 days, Monday logic is often rigid.
-    return _discover_cpkc_cdn_url(CPKC_53WEEK_FILENAME, max_back_days=14)
+    """Attempts to guess the URL for the CPKC 53-week report based on the last two Mondays."""
+    today = dt.date.today()
+    # Find the date of the last Monday
+    offset = (today.weekday() - 0) % 7 # Monday is 0
+    last_monday = today - dt.timedelta(days=offset)
+    
+    # Check the last Monday and the Monday before that
+    candidates = [last_monday, last_monday - dt.timedelta(days=7)]
+    
+    for d in candidates:
+        # Construct the URL based on the CDN folder structure (Year/Month/Day)
+        url = f"{CPKC_CDN_BASE}/{d.strftime('%Y/%m/%d')}/{CPKC_53WEEK_FILENAME}"
+        if http_head_ok(url): 
+            return url
+        
+    raise FileNotFoundError("CPKC 53-week file not found for last two Mondays.")
 
 def download_cpkc_53week():
-    resp = http_get(discover_cpkc_53week_url())
-    return save_bytes(resp.content, f"CPKC_53_Week_{datestamp()}.xlsx")
+    """Downloads the CPKC 53-week performance file."""
+    print("\n--- Scraping CPKC 53-week Report ---")
+    url = discover_cpkc_53week_url()
+    print(f"⬇️ CPKC 53-Week found at {url}")
+    resp = http_get(url)
+    fname = f"CPKC_53_Week_{datestamp()}.xlsx"
+    return save_bytes(resp.content, fname)
 
 def discover_cpkc_rtm_url():
-    # RTM file uses the year in the filename
-    filename_pattern = "CPKC-Weekly-RTMs-and-Carloads-{year}.xlsx"
-    # Search last 14 days
-    return _discover_cpkc_cdn_url(filename_pattern, max_back_days=14)
+    """Attempts to guess the URL for the CPKC Weekly RTMs and Carloads, checking the last 14 days."""
+    today = dt.date.today()
+    for delta in range(0, 14):
+        d = today - dt.timedelta(days=delta)
+        # File name convention uses the current year in the name
+        url = f"{CPKC_CDN_BASE}/{d.strftime('%Y/%m/%d')}/CPKC-Weekly-RTMs-and-Carloads-{d.year}.xlsx"
+        if http_head_ok(url): 
+            return url
+        
+    raise FileNotFoundError("CPKC Weekly RTM/Carloads not found in last 14 days.")
 
 def download_cpkc_rtm():
-    resp = http_get(discover_cpkc_rtm_url())
-    return save_bytes(resp.content, f"CPKC_Weekly_RTM_{datestamp()}.xlsx")
+    """Downloads the CPKC Weekly RTMs and Carloads file."""
+    print("\n--- Scraping CPKC Weekly RTM/Carloads ---")
+    url = discover_cpkc_rtm_url()
+    print(f"⬇️ CPKC RTM/Carloads found at {url}")
+    resp = http_get(url)
+    fname = f"CPKC_Weekly_RTM_{datestamp()}.xlsx"
+    return save_bytes(resp.content, fname)
 
-# =========================
-# CSX — CDN-first (working), page as fallback (Excel)
-# =========================
+# --------------------------
+# === CSX ===
+# --------------------------
+
 def _iso_week_year(date_obj): 
-    iso = date_obj.isocalendar(); return iso[0], iso[1]
+    """Returns the ISO Year and Week Number for CDN file naming."""
+    return date_obj.isocalendar()[0], date_obj.isocalendar()[1]
 
-def _csx_candidate_filenames(year: int, week: int) -> List[str]:
-    """Provides Excel filename candidates including future-proofed year references."""
-    # Note: These names are based on observed patterns and may need yearly adjustment
+def _csx_candidate_filenames(year, week):
+    """Returns potential CSX file names based on week/year convention."""
     return [
         f"Historical_Data_Week_{week}_{year}.xlsx",
-        f"Combined-Intermodal-and-Carload-TPC-Week-1-2022-Week-{week}-{year}.xlsx",
-        f"Combined-Intermodal-and-Carload-TPC-Week-1-2023-Week-{week}-{year}.xlsx",
-        f"Combined-Intermodal-and-Carload-TPC-Week-1-2024-Week-{week}-{year}.xlsx",
-        f"Combined-Intermodal-and-Carload-TPC-Week-1-2025-Week-{week}-{year}.xlsx", # Good through next year
+        # Example of a known filename convention for newer data
+        f"Combined-Intermodal-and-Carload-TPC-Week-1-{year}-Week-{week}-{year}.xlsx",
     ]
 
 def discover_csx_url(max_back_days=10):
+    """
+    Attempts to guess the CSX CDN URL based on recent weeks, then falls back 
+    to scraping the metrics page.
+    """
+    print("\n--- Scraping CSX Metrics ---")
     today = dt.date.today()
-    # Use last week (files are generally published after the week ends)
-    last_week_end = today - dt.timedelta(days=today.weekday() + 2)
+    # Calculate the end of the previous rail week (usually Sunday/Monday reporting)
+    last_week_end = today - dt.timedelta(days=today.weekday() + 2) 
     year, week = _iso_week_year(last_week_end)
-
-    # 1) CDN-first: try past N days of folders
+    
+    # 1. Attempt CDN Guessing
     for delta in range(max_back_days):
         d = today - dt.timedelta(days=delta)
         folder = d.strftime("%Y/%m/%d")
         for fname in _csx_candidate_filenames(year, week):
             url = f"{CSX_CDN_BASE}/{folder}/{fname}"
             if http_head_ok(url): 
-                print(f"✅ CSX URL found via CDN: {url}")
+                print(f"✅ Found CSX URL via CDN guess: {url}")
                 return url
-
-    # 2) Fallback: parse metrics page for any .xlsx
-    print("⚠️ CSX CDN failed. Trying metrics page scrape...")
+            
+    # 2. Fallback to Scraping the Metrics Page
+    print("⚠️ CDN guess failed. Falling back to scraping metrics page.")
     try:
-        r = http_get(CSX_METRICS_PAGE, retries=2)
+        r = http_get(CSX_METRICS_PAGE)
         soup = BeautifulSoup(r.text, "html.parser")
-        links = [a["href"] for a in soup.find_all("a", href=True) if a["href"].lower().endswith(".xlsx")]
+        # Find all direct links to XLSX files
+        links = [a["href"] for a in soup.find_all("a", href=True) if a["href"].endswith(".xlsx")]
         for u in links:
-            u = normalize_url("https://investors.csx.com", u)
+            # Normalize URL
+            if u.startswith("//"): u = "https:" + u
+            elif u.startswith("/"): u = "https://investors.csx.com" + u
+            
+            # Use the first valid Excel link found
             if http_head_ok(u): 
-                print(f"✅ CSX URL found via fallback scrape: {u}")
+                print(f"✅ Found CSX URL via scrape: {u}")
                 return u
     except Exception as e:
-        print(f"⚠️ CSX fallback scrape failed: {e}")
-
-    raise FileNotFoundError("CSX Excel not found (CDN + fallback both failed).")
+        # Log scrape error but continue to final FileNotFoundError
+        print(f"❌ CSX scrape fallback failed: {e}")
+        
+    raise FileNotFoundError("CSX Excel not found via CDN guess or metrics page scrape.")
 
 def download_csx():
-    """Downloads the CSX Weekly Performance Excel file."""
+    """Downloads the discovered CSX Excel file."""
     url = discover_csx_url()
     resp = http_get(url)
+    # Use the filename from the server, cleaned up
     server_name = url.rstrip("/").rsplit("/", 1)[-1]
-    fname = sanitize_filename(f"CSX_Performance_{datestamp()}_{server_name}")
+    fname = sanitize_filename(f"CSX_{datestamp()}_{server_name}")
     return save_bytes(resp.content, fname)
 
-# << NEW PLAYWRIGHT INTEGRATION >>
-def download_csx_aar_reports():
-    """
-    Uses Playwright to scrape the dynamically loaded Weekly Carload Report (PDF) links 
-    from the CSX Investor Relations page and downloads the latest one.
-    """
-    if not PLAYWRIGHT_AVAILABLE:
-        print("❌ Playwright not installed. Skipping CSX AAR PDF download.")
-        print("   Run: pip install playwright requests && playwright install")
-        return []
-
-    print("🚀 Launching headless browser to fetch CSX AAR PDF links...")
-    carload_links = []
-    
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch()
-            page = browser.new_page()
-            page.goto(CSX_METRICS_PAGE, wait_until="networkidle") 
-            
-            # Wait for the dynamic 'Weekly Carload Reports' section to load
-            page.wait_for_selector('h2:has-text("Weekly Carload Reports")', timeout=15000)
-            print("✅ Dynamic content loaded.")
-            
-            # Find the main container for the reports and get all link elements
-            reports_container = page.locator('div.module.module-metrics-volume').first
-            link_elements = reports_container.locator('a:has-text("AAR(opens in new window)")').all()
-
-            for element in link_elements:
-                link_text = element.inner_text().replace('(opens in new window)', '').strip()
-                link_url = element.get_attribute('href')
-
-                # Handle relative URLs
-                if link_url and link_url.startswith('/'):
-                    link_url = f"https://investors.csx.com{link_url}"
-
-                if link_url:
-                    carload_links.append((link_text, link_url))
-
-            browser.close()
-            
-    except Exception as e:
-        print(f"❌ An error occurred during Playwright scraping: {e}")
-        return []
-
-    if not carload_links:
-        print("⚠️ Found no CSX AAR PDF links via Playwright.")
-        return []
-    
-    # Download the latest report (it's usually the first one in the list)
-    latest_name, latest_url = carload_links[0]
-    
-    print(f"⬇️ Downloading latest CSX AAR PDF: {latest_name}")
-    
-    try:
-        # Use existing http_get for the final download
-        resp = http_get(latest_url, retries=3) 
-        filename = sanitize_filename(f"CSX_AAR_Carloads_{datestamp()}_{latest_name}.pdf")
-        return [save_bytes(resp.content, filename)]
-    except Exception as e:
-        print(f"❌ Failed to download CSX AAR PDF from {latest_url}: {e}")
-        return []
-
-# =========================
-# UP — Scrape the metrics page for current links (FIXED)
-# =========================
-def download_up():
-    print(f"⬇️ Connecting to Union Pacific metrics page: {UP_METRICS_PAGE}")
-    r = http_get(UP_METRICS_PAGE, timeout=TIMEOUT_UP, retries=3)
-    soup = BeautifulSoup(r.text, "html.parser")
-    anchors = soup.find_all("a", href=True)
-    saved = []
-    
-    # Target file names/keywords mentioned on the UP page
-    keywords = ["rtm", "carload", "performance", "metric"] 
-    downloaded_urls = set()
-    
-    for a in anchors:
-        href = a["href"]
-        text = (a.get_text() or "").lower()
-        if not href.lower().endswith((".xlsx", ".xls")):
-            continue
-            
-        is_relevant = any(k in href.lower() or k in text for k in keywords)
-        
-        if is_relevant:
-            url = normalize_url("https://investor.unionpacific.com", href)
-            
-            # Label based on content
-            label = "RTM_Carloadings" if "rtm" in url.lower() or "carload" in url.lower() else "Performance_Measures"
-            
-            if url not in downloaded_urls:
-                print(f"⬇️ UP {label} found at {url}")
-                try:
-                    resp = http_get(url, timeout=TIMEOUT_UP, retries=3)
-                    saved.append(save_bytes(resp.content, f"UP_{label}_{datestamp()}.xlsx"))
-                    downloaded_urls.add(url)
-                    time.sleep(0.5) # Be polite
-                except Exception as e:
-                    print(f"❌ Failed to download UP file from {url}: {e}")
-
-    if not saved:
-        raise FileNotFoundError("No UP RTM or Performance XLSX links found on the metrics page.")
-    return saved
-
-# =========================
-# NS — Excel + Latest Weekly PDF (FIXED)
-# =========================
-def download_ns():
-    r = http_get(NS_REPORTS_PAGE)
-    soup = BeautifulSoup(r.text, "html.parser")
-    anchors = soup.find_all("a", href=True)
-    saved = []
-    
-    pdf_links = []
-    xlsx_links = []
-    
-    for a in anchors:
-        href = a["href"]
-        text = (a.get_text() or "").lower()
-        if not href: continue
-        url = normalize_url("https://norfolksouthern.investorroom.com", href)
-
-        # Look for the latest WEEKLY Carloads PDF (must contain 'weekly carload' or 'aar weekly carload')
-        if href.lower().endswith(".pdf") and ("weekly carload" in text or "aar weekly carload" in text):
-            pdf_links.append(url)
-
-        # Look for the latest Performance XLSX
-        if href.lower().endswith(".xlsx") and "performance" in text:
-            xlsx_links.append(url)
-
-    # 1. Download Latest Weekly Carloads PDF (NS lists newest-first)
-    if pdf_links:
-        latest_pdf_url = pdf_links[0] 
-        print(f"⬇️ NS Weekly Carload PDF: {latest_pdf_url}")
-        resp = http_get(latest_pdf_url, referer=NS_REPORTS_PAGE, retries=3)
-        saved.append(save_bytes(resp.content, f"NS_Weekly_Carloads_{datestamp()}.pdf"))
-
-    # 2. Download Latest Performance XLSX
-    if xlsx_links:
-        latest_xlsx_url = xlsx_links[0]
-        print(f"⬇️ NS Performance XLSX: {latest_xlsx_url}")
-        resp = http_get(latest_xlsx_url, referer=NS_REPORTS_PAGE, retries=3)
-        saved.append(save_bytes(resp.content, f"NS_Performance_{datestamp()}.xlsx"))
-
-    if not saved:
-        raise FileNotFoundError("NS reports not found (Weekly Carload PDF or Performance XLSX).")
-    return saved
-
-# =========================
-# BNSF — Current Weekly Carload (PDF)
-# =========================
-def download_bnsf():
-    r = http_get(BNSF_REPORTS_PAGE)
-    soup = BeautifulSoup(r.text, "html.parser")
-    for a in soup.find_all("a", href=True):
-        txt = (a.get_text() or "").lower()
-        # Look for the current weekly carload report (usually the top link)
-        if "carload" in txt and a["href"].lower().endswith(".pdf"):
-            url = normalize_url("https://www.bnsf.com", a["href"])
-            # Ensure it's not a historical or monthly link if a specific 'weekly' link is available
-            if "weekly" in txt or "carloadings" in txt: 
-                resp = http_get(url, retries=3)
-                return save_bytes(resp.content, f"BNSF_Carloads_{datestamp()}.pdf")
-            
-    raise FileNotFoundError("BNSF weekly carload PDF not found")
-
-# =========================
-# Main
-# =========================
+# --------------------------
+# === MAIN EXECUTION ===
+# --------------------------
 def main():
     print(f"📂 Download folder: {DOWNLOAD_FOLDER}")
     fetched = []
+    
+    # List of functions to execute
     tasks = [
         ("STB EP724", download_ep724),
-        ("CN Performance", download_cn_perf),
-        ("CN RTM", download_cn_rtm),
+        ("CN Performance (Direct)", download_cn_perf),
+        ("CN RTM (Scrape)", download_cn_rtm),
         ("CPKC 53-week", download_cpkc_53week),
         ("CPKC Weekly RTM", download_cpkc_rtm),
-        # CSX Excel is first
-        ("CSX Performance XLSX", download_csx),
-        # << NEW PLAYWRIGHT INTEGRATION >> CSX AAR PDF is new
-        ("CSX AAR Carloads PDF", download_csx_aar_reports), 
-        ("UP", download_up),
-        ("NS", download_ns),
-        ("BNSF", download_bnsf),
+        ("CSX", download_csx),
     ]
+    
     for name, fn in tasks:
         try:
-            print(f"\n--- Starting {name} ---")
             result = fn()
+            # Handle both single file returns and list returns
             if isinstance(result, list): fetched.extend(result)
-            elif result: fetched.append(result) # Only append if the result is not None/empty
+            else: fetched.append(result)
         except Exception as e:
             print(f"❌ {name} failed: {e}")
-
-    print("\n" + "="*30)
+            
+    print("\n--------------------------------")
     if fetched:
-        print(f"✅ ALL TARGETED FILES DOWNLOADED ({len(fetched)} total):")
+        print("✅ SCRAPING COMPLETE: Files downloaded:")
         for f in fetched: print(" •", f)
     else:
-        print("❌ NO files downloaded.")
-    print("="*30)
+        print("❌ SCRAPING COMPLETE: No files downloaded.")
 
 if __name__ == "__main__":
     main()

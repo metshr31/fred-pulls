@@ -85,23 +85,22 @@ def normalize_url(base: str, href: str) -> Union[str, None]:
     return urljoin(base, href)
 
 # =========================
-# NS (corrected)
+# NS (fixed)
 # =========================
 def download_ns() -> List[str]:
     """
     Download Norfolk Southern's Weekly Performance Report (PDF)
-    and the most recent Weekly Carloading Report (PDF).
+    and the current month's Weekly Carloading Report (PDF).
     """
     r = http_get(NS_REPORTS_PAGE)
     soup = BeautifulSoup(r.text, "html.parser")
     saved = []
 
-    # --- Weekly Performance Report ---
+    # --- Weekly Performance Report (look for 2025_NS_Monthly_AAR_Performance.pdf) ---
     perf_link = None
     for a in soup.find_all("a", href=True):
-        txt = (a.get_text() or "").strip().lower()
         href = a["href"].lower()
-        if "weekly performance report" in txt and href.endswith(".pdf"):
+        if href.endswith("2025_ns_monthly_aar_performance.pdf"):
             perf_link = normalize_url(NS_REPORTS_PAGE, a["href"])
             break
     if perf_link:
@@ -109,29 +108,21 @@ def download_ns() -> List[str]:
         resp = http_get(perf_link, referer=NS_REPORTS_PAGE)
         saved.append(save_bytes(resp.content, f"NS_Performance_{datestamp()}.pdf"))
     else:
-        print("⚠️ No Weekly Performance Report link found")
+        print("⚠️ No Performance Report PDF found")
 
-    # --- Weekly Carloading Reports ---
-    carload_page = None
+    # --- Weekly Carloading Reports (look for investor-weekly-carloads-<month>-2025.pdf) ---
+    carload_link = None
     for a in soup.find_all("a", href=True):
-        if "weekly carloading reports" in (a.get_text() or "").lower():
-            carload_page = normalize_url(NS_REPORTS_PAGE, a["href"])
+        href = a["href"].lower()
+        if "investor-weekly-carloads-" in href and href.endswith("2025.pdf"):
+            carload_link = normalize_url(NS_REPORTS_PAGE, a["href"])
             break
-    if carload_page:
-        sub = http_get(carload_page)
-        subsoup = BeautifulSoup(sub.text, "html.parser")
-        pdfs = [normalize_url(carload_page, a["href"])
-                for a in subsoup.find_all("a", href=True)
-                if a["href"].lower().endswith(".pdf")]
-        if pdfs:
-            latest_carload = sorted(pdfs)[-1]
-            print(f"⬇️ NS Carload PDF: {latest_carload}")
-            resp = http_get(latest_carload, referer=carload_page)
-            saved.append(save_bytes(resp.content, f"NS_Carloads_{datestamp()}.pdf"))
-        else:
-            print("⚠️ No carloading PDFs found")
+    if carload_link:
+        print(f"⬇️ NS Carloading PDF: {carload_link}")
+        resp = http_get(carload_link, referer=NS_REPORTS_PAGE)
+        saved.append(save_bytes(resp.content, f"NS_Carloads_{datestamp()}.pdf"))
     else:
-        print("⚠️ No Weekly Carloading Reports section found")
+        print("⚠️ No Carloading Report PDF found")
 
     if not saved:
         raise FileNotFoundError("NS reports not found")
@@ -140,8 +131,9 @@ def download_ns() -> List[str]:
 # =========================
 # (Other railroads unchanged – CN, CPKC, CSX, UP, BNSF)
 # =========================
-# ... keep your existing download_ep724, download_cn_perf, download_cn_rtm,
-# download_cpkc_53week, download_cpkc_rtm, download_csx, download_up, download_bnsf here ...
+# ... your existing functions for download_ep724, download_cn_perf,
+# download_cn_rtm, download_cpkc_53week, download_cpkc_rtm, download_csx,
+# download_up, download_bnsf remain here ...
 
 # =========================
 # Main
@@ -150,8 +142,8 @@ def download_all():
     print(f"📂 Download folder: {DOWNLOAD_FOLDER}")
     fetched: List[str] = []
     tasks = [
-        # Add back your other tasks here
         ("NS", download_ns),
+        # add the other carriers here if you want them to run as well
     ]
     for name, fn in tasks:
         try:

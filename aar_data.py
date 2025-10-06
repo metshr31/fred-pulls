@@ -147,41 +147,32 @@ def download_cpkc_rtm() -> str:
     return save_bytes(resp.content, f"CPKC_Weekly_RTM_{datestamp()}.xlsx")
 
 # =========================
-# CSX Excel
+# CSX Excel – only Historical_Data_Week file
 # =========================
-def _iso_week_year(date_obj: dt.date) -> tuple[int, int]:
-    iso = date_obj.isocalendar()
-    return iso[0], iso[1]
-
-def _csx_candidate_filenames(year: int, week: int) -> List[str]:
-    return [
-        f"Historical_Data_Week_{week}_{year}.xlsx",
-        f"Combined-Intermodal-and-Carload-TPC-Week-1-2025-Week-{week}-{year}.xlsx",
-    ]
-
-def discover_csx_url(max_back_days: int = 10) -> str:
+def discover_csx_excel(max_back_weeks: int = 8) -> str:
+    """
+    Find the latest CSX Historical_Data_Week Excel file (no TPC).
+    Looks back up to `max_back_weeks` if the current week is missing.
+    """
     today = dt.date.today()
-    last_week_end = today - dt.timedelta(days=today.weekday() + 2)
-    year, week = _iso_week_year(last_week_end)
-    for delta in range(max_back_days):
-        d = today - dt.timedelta(days=delta)
+    tried_urls = []
+
+    for delta in range(max_back_weeks):
+        d = today - dt.timedelta(weeks=delta)
+        year, week, _ = d.isocalendar()
         folder = d.strftime("%Y/%m/%d")
-        for fname in _csx_candidate_filenames(year, week):
-            url = f"{CSX_CDN_BASE}/{folder}/{fname}"
-            if http_head_ok(url):
-                print(f"✅ CSX URL found via CDN: {url}")
-                return url
-    r = http_get(CSX_METRICS_PAGE, retries=1)
-    soup = BeautifulSoup(r.text, "html.parser")
-    links = [a["href"] for a in soup.find_all("a", href=True) if a["href"].endswith(".xlsx")]
-    for u in links:
-        u = normalize_url("https://investors.csx.com", u)
-        if u and http_head_ok(u):
-            return u
-    raise FileNotFoundError("CSX Excel not found")
+        fname = f"Historical_Data_Week_{week}_{year}.xlsx"
+        url = f"{CSX_CDN_BASE}/{folder}/{fname}"
+        tried_urls.append(url)
+
+        if http_head_ok(url):
+            print(f"✅ CSX Excel found: {url}")
+            return url
+
+    raise FileNotFoundError(f"CSX Historical_Data Excel not found. Tried: {tried_urls}")
 
 def download_csx() -> str:
-    url = discover_csx_url()
+    url = discover_csx_excel()
     resp = http_get(url)
     server_name = url.rstrip("/").rsplit("/", 1)[-1]
     fname = sanitize_filename(f"CSX_{datestamp()}_{server_name}")

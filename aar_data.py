@@ -147,20 +147,20 @@ def download_cpkc_rtm() -> str:
     return save_bytes(resp.content, f"CPKC_Weekly_RTM_{datestamp()}.xlsx")
 
 # =========================
-# CSX Excel – only Historical_Data_Week file
+# CSX Excel – Historical_Data_Week only
 # =========================
-def discover_csx_excel(max_back_weeks: int = 8) -> str:
+def discover_csx_excel(max_back_days: int = 30) -> str:
     """
-    Find the latest CSX Historical_Data_Week Excel file (no TPC).
-    Looks back up to `max_back_weeks` if the current week is missing.
+    Find the latest CSX Historical_Data_Week Excel file by checking daily
+    folders in the CDN path (year/month/day).
     """
     today = dt.date.today()
     tried_urls = []
 
-    for delta in range(max_back_weeks):
-        d = today - dt.timedelta(weeks=delta)
+    for delta in range(max_back_days):
+        d = today - dt.timedelta(days=delta)
+        folder = d.strftime("%Y/%m/%d")  # e.g. 2025/09/30
         year, week, _ = d.isocalendar()
-        folder = d.strftime("%Y/%m/%d")
         fname = f"Historical_Data_Week_{week}_{year}.xlsx"
         url = f"{CSX_CDN_BASE}/{folder}/{fname}"
         tried_urls.append(url)

@@ -43,27 +43,33 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml pandas openpyxl xlsxwriter pdfplumber
 
-      - name: Run aar_data.py
+      - name: Run aar_data.py (downloads raw files)
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
-        run: python aar_data.py
+        run: |
+          python aar_data.py 2>&1 | tee -a run.log
+
+      - name: Run aar_parse.py (parse + merge)
+        if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
+        run: |
+          python aar_parse.py 2>&1 | tee -a run.log
 
       - name: List downloaded files
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
-        run: ls -lh *.xlsx *.pdf || echo "⚠️ No Excel/PDF files found"
+        run: ls -lh *.xlsx *.pdf *.log || echo "⚠️ No Excel/PDF files found"
 
       - name: Set artifact name with date + weekday
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
         run: echo "ARTIFACT_NAME=rail_service_excels_$(date +'%Y-%m-%d_%a')" >> $GITHUB_ENV
 
-      - name: Zip all outputs
-        if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
-        run: |
-          zip -r ${{ env.ARTIFACT_NAME }}.zip *.xlsx *.pdf || echo "⚠️ Nothing to zip"
-
-      - name: Upload artifact (single zip)
+      - name: Upload artifacts (Excel + PDF + log) as single ZIP
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: ${{ env.ARTIFACT_NAME }}.zip
+          path: |
+            *.xlsx
+            *.pdf
+            run.log
+          if-no-files-found: error
+          compression-level: 9
           retention-days: 14

@@ -13,7 +13,6 @@ from urllib.parse import urljoin
 STB_URL = "https://www.stb.gov/reports-data/rail-service-data/"
 CN_PERF_URL = "https://www.cn.ca/-/media/files/investors/investor-performance-measures/perf_measures_en.xlsx"
 CN_METRICS_PAGE = "https://www.cn.ca/en/investors/key-weekly-metrics/"
-CSX_METRICS_PAGE = "https://investors.csx.com/metrics/default.aspx"
 CSX_CDN_BASE = "https://s2.q4cdn.com/859568992/files/doc_downloads"
 CPKC_CDN_BASE = "https://s21.q4cdn.com/736796105/files/doc_downloads"
 CPKC_53WEEK_FILENAME = "CPKC-53-Week-Railway-Performance-Report.xlsx"
@@ -147,49 +146,49 @@ def download_cpkc_rtm() -> str:
     return save_bytes(resp.content, f"CPKC_Weekly_RTM_{datestamp()}.xlsx")
 
 # =========================
-# CSX Excel (Historical Data only)
+# CSX Excel (Historical_Data only)
 # =========================
-def discover_csx_excel(max_back_days: int = 45) -> str:
+def discover_csx_historical(max_back_weeks: int = 12) -> str:
     """
-    Discover the latest CSX Historical Data Excel file by walking backwards day by day.
-    Ignores TPC files and only fetches Historical_Data_Week_* files.
-    Example target:
-      https://s2.q4cdn.com/859568992/files/doc_downloads/2025/09/30/Historical_Data_Week_39_2025.xlsx
+    Find the most recent CSX Historical_Data_Week file by checking backward
+    from the current ISO week up to max_back_weeks.
     """
     today = dt.date.today()
-    year = today.year
-    tried_urls = []
+    iso_year, iso_week, _ = today.isocalendar()
 
-    for delta in range(max_back_days):
-        d = today - dt.timedelta(days=delta)
-        folder = d.strftime("%Y/%m/%d")
+    tried = []
+    for delta in range(max_back_weeks):
+        week = iso_week - delta
+        year = iso_year
+        # if we roll back before week 1, adjust year
+        while week <= 0:
+            year -= 1
+            last_dec = dt.date(year, 12, 28)  # ISO week 52 or 53
+            week = last_dec.isocalendar()[1] + week
 
-        # Try only Historical_Data_Week files
-        fname = f"Historical_Data_Week_{d.isocalendar()[1]}_{year}.xlsx"
-        url = f"{CSX_CDN_BASE}/{folder}/{fname}"
-        tried_urls.append(url)
+        # Try every day folder of the last 14 days (posting lag possible)
+        for day_delta in range(0, 14):
+            d = today - dt.timedelta(days=day_delta)
+            folder = d.strftime("%Y/%m/%d")
+            fname = f"Historical_Data_Week_{week}_{year}.xlsx"
+            url = f"{CSX_CDN_BASE}/{folder}/{fname}"
+            tried.append(url)
+            if http_head_ok(url):
+                print(f"✅ Found CSX Historical Data: {url}")
+                return url
 
-        if http_head_ok(url):
-            print(f"✅ Found CSX Historical Excel: {url}")
-            return url
-
-    raise FileNotFoundError(f"No CSX Historical Excel found in last {max_back_days} days. Tried: {tried_urls[-5:]}")
+    raise FileNotFoundError(f"❌ Could not find CSX Historical_Data file. Tried: {tried[-5:]} (and more)")
 
 def download_csx() -> str:
-    url = discover_csx_excel()
+    url = discover_csx_historical()
     resp = http_get(url)
-    fname = os.path.basename(url)
-    return save_bytes(resp.content, f"CSX_{datestamp()}_{fname}")
+    fname = sanitize_filename(f"CSX_{os.path.basename(url)}")
+    return save_bytes(resp.content, fname)
 
 # =========================
-# CSX AAR (PDF) – robust back-search
+# CSX AAR (PDF)
 # =========================
 def download_csx_aar(max_back_weeks: int = 12) -> str:
-    """
-    Find and download the latest available CSX Weekly AAR PDF by searching
-    backwards up to `max_back_weeks`. Names the saved file with the actual
-    Year + Week from the PDF URL.
-    """
     today = dt.date.today()
     tried_urls = []
 
@@ -198,16 +197,13 @@ def download_csx_aar(max_back_weeks: int = 12) -> str:
         year, week, _ = d.isocalendar()
         url = f"{CSX_CDN_BASE}/volume_trends/{year}/{year}-Week-{week}-AAR.pdf"
         tried_urls.append(url)
-
         if http_head_ok(url):
             print(f"⬇️ CSX AAR PDF found: {url}")
             resp = http_get(url)
             fname = sanitize_filename(f"CSX_AAR_{year}-Week-{week}.pdf")
             return save_bytes(resp.content, fname)
 
-    raise FileNotFoundError(
-        f"CSX AAR PDF not found in the last {max_back_weeks} weeks. Tried: {tried_urls}"
-    )
+    raise FileNotFoundError(f"❌ No CSX AAR PDF found in last {max_back_weeks} weeks. Tried {tried_urls[-5:]}")
 
 # =========================
 # UP
@@ -296,8 +292,8 @@ def download_all():
         ("CN RTM", download_cn_rtm),
         ("CPKC 53-week", download_cpkc_53week),
         ("CPKC Weekly RTM", download_cpkc_rtm),
-        ("CSX", download_csx),
-        ("CSX AAR", download_csx_aar),  # now robust
+        ("CSX Excel", download_csx),
+        ("CSX AAR", download_csx_aar),
         ("UP", download_up),
         ("NS", download_ns),
         ("BNSF", download_bnsf),

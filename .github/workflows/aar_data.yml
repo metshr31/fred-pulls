@@ -41,7 +41,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ghostscript python3-tk python3-opencv libgl1 libglib2.0-0 libsm6 libxrender1 libxext6
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml pandas openpyxl xlsxwriter
+          pip install requests beautifulsoup4 lxml pandas openpyxl xlsxwriter pdfplumber
 
       - name: Run aar_data.py
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
@@ -55,12 +55,15 @@ jobs:
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
         run: echo "ARTIFACT_NAME=rail_service_excels_$(date +'%Y-%m-%d_%a')" >> $GITHUB_ENV
 
-      - name: Upload artifacts (Excel + PDF)
+      - name: Zip all outputs
+        if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
+        run: |
+          zip -r ${{ env.ARTIFACT_NAME }}.zip *.xlsx *.pdf || echo "⚠️ Nothing to zip"
+
+      - name: Upload artifact (single zip)
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: |
-            *.xlsx
-            *.pdf
+          path: ${{ env.ARTIFACT_NAME }}.zip
           retention-days: 14

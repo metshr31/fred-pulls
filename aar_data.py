@@ -188,34 +188,32 @@ def download_csx() -> str:
     return save_bytes(resp.content, fname)
 
 # =========================
-# CSX AAR (PDF)
+# CSX AAR (PDF) – robust back-search
 # =========================
-def download_csx_aar() -> str:
+def download_csx_aar(max_back_weeks: int = 12) -> str:
     """
-    Download CSX Weekly AAR PDF based on year/week pattern.
-    Example: https://s2.q4cdn.com/.../2025/2025-Week-39-AAR.pdf
+    Find and download the latest available CSX Weekly AAR PDF by searching
+    backwards up to `max_back_weeks`. Names the saved file with the actual
+    Year + Week from the PDF URL.
     """
     today = dt.date.today()
-    iso_year, iso_week, _ = today.isocalendar()
+    tried_urls = []
 
-    url = f"{CSX_CDN_BASE}/volume_trends/{iso_year}/{iso_year}-Week-{iso_week}-AAR.pdf"
-    tried_urls = [url]
-
-    if not http_head_ok(url):
-        prev_week = today - dt.timedelta(weeks=1)
-        prev_year, prev_weeknum, _ = prev_week.isocalendar()
-        url = f"{CSX_CDN_BASE}/volume_trends/{prev_year}/{prev_year}-Week-{prev_weeknum}-AAR.pdf"
+    for delta in range(max_back_weeks):
+        d = today - dt.timedelta(weeks=delta)
+        year, week, _ = d.isocalendar()
+        url = f"{CSX_CDN_BASE}/volume_trends/{year}/{year}-Week-{week}-AAR.pdf"
         tried_urls.append(url)
 
-    if http_head_ok(url):
-        print(f"⬇️ CSX AAR PDF: {url}")
-        resp = http_get(url)
-        week_match = re.search(r"Week-(\d+)", url)
-        week_str = f"Week{week_match.group(1)}" if week_match else "UnknownWeek"
-        fname = sanitize_filename(f"CSX_AAR_{datestamp()}_{week_str}.pdf")
-        return save_bytes(resp.content, fname)
-    else:
-        raise FileNotFoundError(f"CSX AAR file not found. Tried: {tried_urls}")
+        if http_head_ok(url):
+            print(f"⬇️ CSX AAR PDF found: {url}")
+            resp = http_get(url)
+            fname = sanitize_filename(f"CSX_AAR_{year}-Week-{week}.pdf")
+            return save_bytes(resp.content, fname)
+
+    raise FileNotFoundError(
+        f"CSX AAR PDF not found in the last {max_back_weeks} weeks. Tried: {tried_urls}"
+    )
 
 # =========================
 # UP
@@ -305,7 +303,7 @@ def download_all():
         ("CPKC 53-week", download_cpkc_53week),
         ("CPKC Weekly RTM", download_cpkc_rtm),
         ("CSX", download_csx),
-        ("CSX AAR", download_csx_aar),  # <-- NEW
+        ("CSX AAR", download_csx_aar),  # now robust
         ("UP", download_up),
         ("NS", download_ns),
         ("BNSF", download_bnsf),

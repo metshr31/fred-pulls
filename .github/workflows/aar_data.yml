@@ -41,27 +41,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ghostscript python3-tk python3-opencv libgl1 libglib2.0-0 libsm6 libxrender1 libxext6
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml pandas openpyxl xlsxwriter pdfplumber
+          pip install requests beautifulsoup4 lxml pandas openpyxl xlsxwriter
 
-      - name: Run aar_data.py (downloads raw files)
+      - name: Run aar_data.py
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
-        run: |
-          python aar_data.py 2>&1 | tee -a run.log
-
-      - name: Run aar_parse.py (parse + merge)
-        if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
-        run: |
-          python aar_parse.py 2>&1 | tee -a run.log
+        run: python aar_data.py
 
       - name: List downloaded files
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
-        run: ls -lh *.xlsx *.pdf *.log || echo "⚠️ No Excel/PDF files found"
+        run: ls -lh *.xlsx *.pdf || echo "⚠️ No Excel/PDF files found"
 
       - name: Set artifact name with date + weekday
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
         run: echo "ARTIFACT_NAME=rail_service_excels_$(date +'%Y-%m-%d_%a')" >> $GITHUB_ENV
 
-      - name: Upload artifacts (Excel + PDF + log) as single ZIP
+      - name: Upload artifacts (Excel + PDF)
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
         uses: actions/upload-artifact@v4
         with:
@@ -69,7 +63,4 @@ jobs:
           path: |
             *.xlsx
             *.pdf
-            run.log
-          if-no-files-found: error
-          compression-level: 9
           retention-days: 14

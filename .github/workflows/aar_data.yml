@@ -1,4 +1,4 @@
-name: Download Rail Service Excels
+name: Rail Service Weekly Export + Email
 
 on:
   workflow_dispatch:    # allow manual trigger
@@ -8,7 +8,7 @@ on:
     - cron: '0 16 * * 4'
 
 jobs:
-  run-script:
+  run-and-email:
     runs-on: ubuntu-latest
 
     steps:
@@ -41,26 +41,42 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ghostscript python3-tk python3-opencv libgl1 libglib2.0-0 libsm6 libxrender1 libxext6
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml pandas openpyxl xlsxwriter
+          pip install requests beautifulsoup4 lxml pandas openpyxl xlsxwriter pdfplumber
 
       - name: Run aar_data.py
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
         run: python aar_data.py
 
-      - name: List downloaded files
+      - name: Create zip bundle (Excel + PDF)
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
-        run: ls -lh *.xlsx *.pdf || echo "⚠️ No Excel/PDF files found"
+        run: |
+          ZIP_NAME="rail_service_excels_$(date +'%Y-%m-%d_%a').zip"
+          zip "$ZIP_NAME" *.xlsx *.pdf || echo "⚠️ No Excel/PDF files to zip"
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
 
-      - name: Set artifact name with date + weekday
-        if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
-        run: echo "ARTIFACT_NAME=rail_service_excels_$(date +'%Y-%m-%d_%a')" >> $GITHUB_ENV
-
-      - name: Upload artifacts (Excel + PDF)
+      - name: Upload zip artifact
         if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARTIFACT_NAME }}
-          path: |
-            *.xlsx
-            *.pdf
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
           retention-days: 14
+
+      - name: Email zip result
+        if: ${{ steps.timecheck.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch' }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.mail.yahoo.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.YAHOO_EMAIL }}
+          password: ${{ secrets.YAHOO_APP_PASSWORD }}
+          from: ${{ secrets.YAHOO_EMAIL }}
+          to: ${{ secrets.TO_EMAIL }}
+          subject: "Rail Service Export – ${{ github.repository }} – ${{ env.ZIP_NAME }}"
+          body: |
+            Attached is the weekly Rail Service export bundle.
+            Repo: ${{ github.repository }}
+            Run ID: ${{ github.run_id }}
+            Commit: ${{ github.sha }}
+          attachments: ${{ env.ZIP_NAME }}

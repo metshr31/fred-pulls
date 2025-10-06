@@ -147,36 +147,39 @@ def download_cpkc_rtm() -> str:
     return save_bytes(resp.content, f"CPKC_Weekly_RTM_{datestamp()}.xlsx")
 
 # =========================
-# CSX Excel – Historical_Data_Week only
+# CSX Excel (Historical Data only)
 # =========================
-def discover_csx_excel(max_back_days: int = 30) -> str:
+def discover_csx_excel(max_back_days: int = 45) -> str:
     """
-    Find the latest CSX Historical_Data_Week Excel file by checking daily
-    folders in the CDN path (year/month/day).
+    Discover the latest CSX Historical Data Excel file by walking backwards day by day.
+    Ignores TPC files and only fetches Historical_Data_Week_* files.
+    Example target:
+      https://s2.q4cdn.com/859568992/files/doc_downloads/2025/09/30/Historical_Data_Week_39_2025.xlsx
     """
     today = dt.date.today()
+    year = today.year
     tried_urls = []
 
     for delta in range(max_back_days):
         d = today - dt.timedelta(days=delta)
-        folder = d.strftime("%Y/%m/%d")  # e.g. 2025/09/30
-        year, week, _ = d.isocalendar()
-        fname = f"Historical_Data_Week_{week}_{year}.xlsx"
+        folder = d.strftime("%Y/%m/%d")
+
+        # Try only Historical_Data_Week files
+        fname = f"Historical_Data_Week_{d.isocalendar()[1]}_{year}.xlsx"
         url = f"{CSX_CDN_BASE}/{folder}/{fname}"
         tried_urls.append(url)
 
         if http_head_ok(url):
-            print(f"✅ CSX Excel found: {url}")
+            print(f"✅ Found CSX Historical Excel: {url}")
             return url
 
-    raise FileNotFoundError(f"CSX Historical_Data Excel not found. Tried: {tried_urls}")
+    raise FileNotFoundError(f"No CSX Historical Excel found in last {max_back_days} days. Tried: {tried_urls[-5:]}")
 
 def download_csx() -> str:
     url = discover_csx_excel()
     resp = http_get(url)
-    server_name = url.rstrip("/").rsplit("/", 1)[-1]
-    fname = sanitize_filename(f"CSX_{datestamp()}_{server_name}")
-    return save_bytes(resp.content, fname)
+    fname = os.path.basename(url)
+    return save_bytes(resp.content, f"CSX_{datestamp()}_{fname}")
 
 # =========================
 # CSX AAR (PDF) – robust back-search

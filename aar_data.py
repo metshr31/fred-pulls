@@ -123,25 +123,59 @@ def download_cn_rtm() -> List[str]:
 # =========================
 # CPKC
 # =========================
-def _discover_cpkc_cdn_url(filename_pattern: str, max_back_days: int = 30) -> str:
+def _discover_cpkc_cdn_url(filename: str, max_back_days: int = 45) -> str:
+    """
+    Probe CPKC's CDN for a given filename by walking back in time and trying both
+    folder layouts that appear on s21.q4cdn.com:
+      - /YYYY/MM/DD/filename
+      - /YYYY/MM/filename
+    Returns the first URL that responds OK to HEAD.
+    """
     today = dt.date.today()
-    latest_url = None
-
     for delta in range(max_back_days):
         d = today - dt.timedelta(days=delta)
-        # Try both YYYY/MM/DD and YYYY/MM formats
-        folders = [
-            d.strftime("%Y/%m/%d"),
-            d.strftime("%Y/%m")
-        ]
-        for folder in folders:
-            url = f"{CPKC_CDN_BASE}/{folder}/{filename_pattern}"
+        # Try both folder patterns for each day we probe
+        for folder in (d.strftime("%Y/%m/%d"), d.strftime("%Y/%m")):
+            url = f"{CPKC_CDN_BASE}/{folder}/{filename}"
             if http_head_ok(url):
-                latest_url = url
                 print(f"✅ Found CPKC file at: {url}")
                 return url
+    raise FileNotFoundError(f"CPKC file ({filename}) not found in last {max_back_days} days.")
 
-    raise FileNotFoundError(f"CPKC file ({filename_pattern}) not found in last {max_back_days} days.")
+def download_cpkc_53week() -> str:
+    """
+    Grab the '53 Week Railway Performance' report from the CPKC CDN, handling
+    both /YYYY/MM/DD and /YYYY/MM folder styles.
+    """
+    filename = "CPKC-53-Week-Railway-Performance-Report.xlsx"
+    url = _discover_cpkc_cdn_url(filename, max_back_days=60)
+    resp = http_get(url)
+    return save_bytes(resp.content, f"CPKC_53_Week_{datestamp()}.xlsx")
+
+def download_cpkc_rtm() -> str:
+    """
+    Grab the 'Weekly RTMs and Carloads' spreadsheet for the current year.
+    CPKC sometimes appends a numeric suffix (e.g., -2025-2.xlsx).
+    We try the highest plausible suffix first and fall back to no suffix.
+    """
+    year = dt.date.today().year
+    base = f"CPKC-Weekly-RTMs-and-Carloads-{year}"
+    # Try possible suffixes from 9 down to 1, then no suffix, to prefer the newest
+    candidates = [f"{base}-{k}.xlsx" for k in range(9, 0, -1)] + [f"{base}.xlsx"]
+
+    last_error = None
+    for fname in candidates:
+        try:
+            url = _discover_cpkc_cdn_url(fname, max_back_days=60)
+            resp = http_get(url)
+            return save_bytes(resp.content, f"CPKC_Weekly_RTM_{datestamp()}.xlsx")
+        except Exception as e:
+            last_error = e
+            # Keep trying the next candidate
+            continue
+
+    # If nothing worked, raise the last error we saw
+    raise FileNotFoundError(f"CPKC RTM file not found with any candidate name. Last error: {last_error}")
 
 # =========================
 # CSX Excel (Historical_Data only)

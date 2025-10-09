@@ -123,27 +123,25 @@ def download_cn_rtm() -> List[str]:
 # =========================
 # CPKC
 # =========================
-def _discover_cpkc_cdn_url(filename_pattern: str, max_back_days: int) -> str:
+def _discover_cpkc_cdn_url(filename_pattern: str, max_back_days: int = 30) -> str:
     today = dt.date.today()
+    latest_url = None
+
     for delta in range(max_back_days):
         d = today - dt.timedelta(days=delta)
-        folder = d.strftime("%Y/%m/%d")
-        url = f"{CPKC_CDN_BASE}/{folder}/{filename_pattern}"
-        if http_head_ok(url):
-            return url
+        # Try both YYYY/MM/DD and YYYY/MM formats
+        folders = [
+            d.strftime("%Y/%m/%d"),
+            d.strftime("%Y/%m")
+        ]
+        for folder in folders:
+            url = f"{CPKC_CDN_BASE}/{folder}/{filename_pattern}"
+            if http_head_ok(url):
+                latest_url = url
+                print(f"✅ Found CPKC file at: {url}")
+                return url
+
     raise FileNotFoundError(f"CPKC file ({filename_pattern}) not found in last {max_back_days} days.")
-
-def download_cpkc_53week() -> str:
-    url = _discover_cpkc_cdn_url(CPKC_53WEEK_FILENAME, 14)
-    resp = http_get(url)
-    return save_bytes(resp.content, f"CPKC_53_Week_{datestamp()}.xlsx")
-
-def download_cpkc_rtm() -> str:
-    today = dt.date.today()
-    year_filename = f"CPKC-Weekly-RTMs-and-Carloads-{today.year}.xlsx"
-    url = _discover_cpkc_cdn_url(year_filename, 14)
-    resp = http_get(url)
-    return save_bytes(resp.content, f"CPKC_Weekly_RTM_{datestamp()}.xlsx")
 
 # =========================
 # CSX Excel (Historical_Data only)

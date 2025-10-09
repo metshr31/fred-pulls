@@ -270,15 +270,26 @@ def download_ns() -> List[str]:
 # BNSF
 # =========================
 def download_bnsf() -> str:
-    r = http_get(BNSF_REPORTS_PAGE)
-    soup = BeautifulSoup(r.text, "html.parser")
-    for a in soup.find_all("a", href=True):
-        txt = (a.get_text() or "").lower()
-        if "carload" in txt and a["href"].lower().endswith(".pdf"):
-            url = normalize_url("https://www.bnsf.com", a["href"])
-            resp = http_get(url, retries=3)
-            return save_bytes(resp.content, f"BNSF_Carloads_{datestamp()}.pdf")
-    raise FileNotFoundError("BNSF weekly carload PDF not found")
+    """
+    Downloads the latest BNSF Weekly Surface Transportation Board Update Excel file
+    from https://www.bnsf.com/news-media/customer-notifications/notification.page?notId=weekly-surface-transportation-board-update
+    """
+    url = "https://www.bnsf.com/news-media/customer-notifications/notification.page?notId=weekly-surface-transportation-board-update"
+    base = "https://www.bnsf.com"
+    resp = http_get(url)
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    # Find the link containing 'stb-update-report'
+    link_tag = soup.find("a", href=re.compile(r"stb-update-report", re.IGNORECASE))
+    if not link_tag or not link_tag.get("href"):
+        raise FileNotFoundError("❌ Could not find BNSF STB Update link on the page.")
+
+    file_url = normalize_url(base, link_tag["href"])
+    print(f"⬇️ Found BNSF STB Update: {file_url}")
+
+    file_resp = http_get(file_url)
+    filename = f"BNSF_STB_Update_{datestamp()}.xlsx"
+    return save_bytes(file_resp.content, filename)
 
 # =========================
 # Main

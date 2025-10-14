@@ -1,4 +1,4 @@
-name: FRED Bulk Pull (Full) – Test
+name: FRED Bulk Pull (Test with Prather)
 
 on:
   workflow_dispatch:
@@ -6,21 +6,15 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: fred-bulk-test
-  cancel-in-progress: false
-
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash
     env:
-      PYTHONUNBUFFERED: "1"
-      PYTHONFAULTHANDLER: "1"
-      MPLBACKEND: Agg
       SAVE_PATH: outputs
+      MPLBACKEND: Agg
 
     steps:
       - name: Checkout code
@@ -35,70 +29,61 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install fredapi pandas numpy openpyxl xlsxwriter statsmodels scipy
-          fi
+          # Minimal deps + Prather (statsmodels pulls scipy)
+          pip install fredapi pandas numpy openpyxl XlsxWriter statsmodels scipy
 
       - name: Prepare outputs dir
         run: |
+          set -euo pipefail
           rm -rf outputs
           mkdir -p outputs
 
       - name: Show repo layout (debug)
         run: |
+          set -euo pipefail
           echo "PWD: $(pwd)"
           ls -lah
           echo "Python files:"
           find . -maxdepth 2 -type f -name "*.py" -print
 
-      - name: Verify full bulk script exists
+      - name: Verify scripts exist
         run: |
-          test -f pull_fred_series_bulk_split_pivot_adaptive.py || { echo "ERROR: script not found"; exit 1; }
+          set -euo pipefail
+          test -f pull_fred_series_bulk_split_pivot_adaptive_test.py || { echo "ERROR: test script not found"; exit 1; }
 
-      - name: Run full bulk pull
+      - name: Run test (Prather)
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          SAVE_PATH: outputs
+          # Optional knobs the test script can read (safe to ignore if unused)
+          H: "12"
+          MC_SIMS: "600"
+          MC_BLOCK: "6"
+          MAX_TRAIN: "120"
         run: |
           set -euo pipefail
-          echo "Running full bulk pull with SAVE_PATH=${SAVE_PATH}"
-          python pull_fred_series_bulk_split_pivot_adaptive.py
-          echo "After run, tree:"
-          ls -lah
+          echo "Running test script with SAVE_PATH=${SAVE_PATH}"
+          START_TS=$(date +%s)
+          python pull_fred_series_bulk_split_pivot_adaptive_test.py
+          END_TS=$(date +%s)
+          ELAPSED=$(( END_TS - START_TS ))
+          echo "After run, listing possible outputs in repo root:"
+          ls -lah | grep -E 'fred_series_2019base\.xlsx' || true
+          echo "Elapsed: ${ELAPSED}s"
 
-      - name: Collect report into outputs
+      - name: Move report into outputs
         run: |
           set -euo pipefail
-          if [ -f "fred_series_2019base.xlsx" ]; then
+          if [ -f fred_series_2019base.xlsx ]; then
             echo "Moving fred_series_2019base.xlsx into outputs/"
-            mv fred_series_2019base.xlsx outputs/
+            mv -f fred_series_2019base.xlsx outputs/
           fi
           echo "Contents of outputs/:"
           ls -lah outputs || true
 
       - name: Upload outputs (artifact)
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fred-bulk-test-output
           path: outputs/**
           if-no-files-found: warn
-
-      - name: Debug dump on failure
-        if: failure()
-        run: |
-          echo "==== DEBUG DUMP BEGIN ===="
-          find . -maxdepth 3 -type f -printf "%p\t%k KB\n" | sort || true
-          echo "--- outputs/ ---"
-          ls -lah outputs || true
-          echo "Package versions:"
-          python -c "import sys; print(sys.version)"
-          python -c "import pandas as m; print('pandas', getattr(m,'__version__','unknown'))" || true
-          python -c "import numpy as m; print('numpy', getattr(m,'__version__','unknown'))" || true
-          python -c "import fredapi as m; print('fredapi', getattr(m,'__version__','unknown'))" || true
-          python -c "import openpyxl as m; print('openpyxl', getattr(m,'__version__','unknown'))" || true
-          python -c "import xlsxwriter as m; print('xlsxwriter', getattr(m,'__version__','unknown'))" || true
-          python -c "import statsmodels as m; print('statsmodels', getattr(m,'__version__','unknown'))" || true
-          python -c "import scipy as m; print('scipy', getattr(m,'__version__','unknown'))" || true
-          echo "==== DEBUG DUMP END ===="

@@ -1,114 +1,53 @@
-name: FRED Bulk Pull (Test)
+# pull_fred_series_bulk_split_pivot_adaptive_test.py
+import os
+import pandas as pd
+from fredapi import Fred
 
-on:
-  workflow_dispatch:
-  # schedule:
-  #   - cron: "0 12 * * 1"   # optional: Mondays @ 12:00 UTC
+START_DATE = "2016-01-01"
+BASE_YEAR  = 2019
+OUTPUT_XLSX = "fred_series_2019base.xlsx"
 
-permissions:
-  contents: read
+FRED_API_KEY = os.environ.get("FRED_API_KEY")
+if not FRED_API_KEY:
+    raise RuntimeError("FRED_API_KEY env var not set")
 
-concurrency:
-  group: fred-bulk-pull-test
-  cancel-in-progress: false
+fred = Fred(api_key=FRED_API_KEY)
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-    env:
-      PYTHONFAULTHANDLER: "1"
-      PYTHONUNBUFFERED: "1"
-      MPLBACKEND: Agg
-      SAVE_PATH: outputs
+SERIES = {
+    "IPMANSICS": "IP: Manufacturing (Total, SA)",
+    "TRUCKD11":  "ATA Truck Tonnage (SA)",
+}
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+def fetch_rebase(code: str) -> pd.DataFrame:
+    s = fred.get_series(code, observation_start=START_DATE)
+    if s is None or len(s) == 0:
+        return pd.DataFrame(columns=["date","value","index_2019=100","series_id","series_label"])
+    df = s.to_frame("value").reset_index().rename(columns={"index": "date"})
+    df["date"] = pd.to_datetime(df["date"])
+    base = df[df["date"].dt.year == BASE_YEAR]["value"].mean()
+    if pd.isna(base) or base == 0:
+        base = df["value"].head(12).mean()
+        if pd.isna(base) or base == 0:
+            base = 1.0
+    df["index_2019=100"] = (df["value"] / base) * 100.0
+    return df
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+frames = []
+for code, label in SERIES.items():
+    df = fetch_rebase(code)
+    if not df.empty:
+        df["series_id"] = code
+        df["series_label"] = label
+        frames.append(df)
 
-      - name: Install dependencies
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            # Excel writer + HW/ARIMA need xlsxwriter & statsmodels
-            pip install pandas numpy fredapi statsmodels openpyxl xlsxwriter
-          fi
+if not frames:
+    raise RuntimeError("No data pulled from FRED in test script.")
 
-      - name: Prepare outputs dir
-        run: |
-          rm -rf outputs
-          mkdir -p outputs
+long_df = pd.concat(frames, ignore_index=True).sort_values(["series_id","date"])
+wide_idx = long_df.pivot_table(index="date", columns="series_id", values="index_2019=100", aggfunc="last").sort_index()
 
-      - name: Show repo layout (debug)
-        run: |
-          echo "PWD: $(pwd)"
-          ls -lah
-          echo "Python files:"
-          find . -maxdepth 2 -type f -name "*.py" -print
+with pd.ExcelWriter(OUTPUT_XLSX, engine="xlsxwriter") as xw:
+    long_df.to_excel(xw, sheet_name="Series_Long", index=False)
+    wide_idx.to_excel(xw, sheet_name="Wide_Index2019")
 
-      - name: Verify test script exists
-        run: |
-          test -f pull_fred_series_bulk_split_pivot_adaptive_test.py || { echo "ERROR: pull_fred_series_bulk_split_pivot_adaptive_test.py not found"; exit 1; }
-
-      - name: Run bulk pull (test)
-        env:
-          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: |
-          set -euo pipefail
-          echo "Running test script with SAVE_PATH=${SAVE_PATH}"
-          python pull_fred_series_bulk_split_pivot_adaptive_test.py
-          echo "After run, tree:"
-          ls -lah .
-
-      - name: Collect output into outputs/
-        run: |
-          set -euo pipefail
-          EXPECT="fred_series_2019base.xlsx"
-          if [ -f "$EXPECT" ]; then
-            mv "$EXPECT" "outputs/$EXPECT"
-          else
-            FOUND="$(find . -maxdepth 3 -type f -name '*.xlsx' | head -n1 || true)"
-            if [ -n "$FOUND" ]; then
-              echo "Found report at: $FOUND"
-              cp "$FOUND" "outputs/$(basename "$FOUND")"
-            else
-              echo "WARN: no .xlsx produced"
-            fi
-          fi
-          echo "Listing outputs/"
-          ls -lah outputs || true
-
-      - name: Upload outputs (artifact)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fred-bulk-test-output
-          path: outputs/**
-          if-no-files-found: warn
-
-      - name: Debug dump on failure
-        if: failure()
-        run: |
-          echo "==== DEBUG DUMP BEGIN ===="
-          find . -maxdepth 3 -type f -printf "%p\t%k KB\n" | sort || true
-          echo "--- outputs/ ---"
-          ls -lah outputs || true
-          echo "Python & libs:"
-          python -c "import sys; print(sys.version)"
-          python -c "import pandas as p; print('pandas', p.__version__)"
-          python -c "import numpy as n; print('numpy', n.__version__)"
-          python -c "import openpyxl as o; print('openpyxl', o.__version__)"
-          python -c "import statsmodels as s; print('statsmodels', s.__version__)"
-          python -c "import xlsxwriter as x; print('xlsxwriter', x.__version__)"
-          python -c "import fredapi as f; print('fredapi', f.__version__)"
-          echo "==== DEBUG DUMP END ===="
+print(f"✅ Test Excel written: {OUTPUT_XLSX}")

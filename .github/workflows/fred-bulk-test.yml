@@ -1,12 +1,7 @@
-name: FRED Bulk Pull (Test)
+name: FRED Bulk Pull (Full) – Test
 
 on:
-  workflow_dispatch: {}
-  push:
-    paths:
-      - "pull_fred_series_bulk_split_pivot_adaptive_test.py"
-      - ".github/workflows/fred-bulk-test.yml"
-      - "requirements.txt"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,13 +11,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  run-test:
+  build:
     runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash
     env:
       PYTHONUNBUFFERED: "1"
+      PYTHONFAULTHANDLER: "1"
+      MPLBACKEND: Agg
       SAVE_PATH: outputs
 
     steps:
@@ -41,48 +38,41 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            pip install fredapi pandas numpy XlsxWriter requests python-dateutil pytz tzdata
+            pip install fredapi pandas numpy openpyxl xlsxwriter statsmodels scipy
           fi
 
       - name: Prepare outputs dir
         run: |
-          set -euo pipefail
           rm -rf outputs
           mkdir -p outputs
 
       - name: Show repo layout (debug)
         run: |
-          set -euo pipefail
           echo "PWD: $(pwd)"
           ls -lah
           echo "Python files:"
           find . -maxdepth 2 -type f -name "*.py" -print
 
-      - name: Verify test script exists
+      - name: Verify full bulk script exists
         run: |
-          test -f pull_fred_series_bulk_split_pivot_adaptive_test.py || { echo "ERROR: test script not found"; exit 1; }
+          test -f pull_fred_series_bulk_split_pivot_adaptive.py || { echo "ERROR: script not found"; exit 1; }
 
-      - name: Run test script
+      - name: Run full bulk pull
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: |
           set -euo pipefail
-          echo "Running test script with SAVE_PATH=${SAVE_PATH}"
-          python pull_fred_series_bulk_split_pivot_adaptive_test.py
+          echo "Running full bulk pull with SAVE_PATH=${SAVE_PATH}"
+          python pull_fred_series_bulk_split_pivot_adaptive.py
           echo "After run, tree:"
           ls -lah
-          echo "Listing outputs/"
-          ls -lah outputs || true
 
-      - name: Collect Excel into outputs
+      - name: Collect report into outputs
         run: |
           set -euo pipefail
-          if [ -f fred_series_2019base.xlsx ]; then
+          if [ -f "fred_series_2019base.xlsx" ]; then
             echo "Moving fred_series_2019base.xlsx into outputs/"
-            mv fred_series_2019base.xlsx outputs/fred_series_2019base.xlsx
-          else
-            echo "WARNING: fred_series_2019base.xlsx not found at repo root"
-            ls -lah
+            mv fred_series_2019base.xlsx outputs/
           fi
           echo "Contents of outputs/:"
           ls -lah outputs || true
@@ -102,7 +92,13 @@ jobs:
           find . -maxdepth 3 -type f -printf "%p\t%k KB\n" | sort || true
           echo "--- outputs/ ---"
           ls -lah outputs || true
-          echo "Python & libs:"
+          echo "Package versions:"
           python -c "import sys; print(sys.version)"
-          python -c "import pandas, numpy; print('pandas', pandas.__version__); print('numpy', numpy.__version__)"
+          python -c "import pandas as m; print('pandas', getattr(m,'__version__','unknown'))" || true
+          python -c "import numpy as m; print('numpy', getattr(m,'__version__','unknown'))" || true
+          python -c "import fredapi as m; print('fredapi', getattr(m,'__version__','unknown'))" || true
+          python -c "import openpyxl as m; print('openpyxl', getattr(m,'__version__','unknown'))" || true
+          python -c "import xlsxwriter as m; print('xlsxwriter', getattr(m,'__version__','unknown'))" || true
+          python -c "import statsmodels as m; print('statsmodels', getattr(m,'__version__','unknown'))" || true
+          python -c "import scipy as m; print('scipy', getattr(m,'__version__','unknown'))" || true
           echo "==== DEBUG DUMP END ===="

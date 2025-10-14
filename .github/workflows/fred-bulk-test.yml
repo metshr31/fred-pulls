@@ -1,0 +1,119 @@
+name: FRED Bulk Pull (Test)
+
+on:
+  workflow_dispatch: {}          # manual “Run workflow” button
+  # schedule:
+  #   - cron: "0 12 * * 1"       # (optional) Mondays @ 12:00 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fred-bulk-pull-test
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONFAULTHANDLER: "1"
+      PYTHONUNBUFFERED: "1"
+      MPLBACKEND: Agg
+      SAVE_PATH: outputs
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            # include xlsxwriter & statsmodels; they’re required for Excel + HW/ARIMA
+            pip install pandas numpy fredapi statsmodels openpyxl xlsxwriter
+          fi
+
+      - name: Prepare outputs dir
+        run: |
+          rm -rf outputs
+          mkdir -p outputs
+
+      - name: Show repo layout (debug)
+        run: |
+          echo "PWD: $(pwd)"
+          ls -lah
+          echo "Python files:"
+          find . -maxdepth 2 -type f -name "*.py" -print
+
+      - name: Verify test script exists
+        run: |
+          test -f pull_fred_series_bulk_split_pivot_adaptive_test.py || { echo "ERROR: pull_fred_series_bulk_split_pivot_adaptive_test.py not found"; exit 1; }
+
+      - name: Run bulk pull (test)
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          set -euo pipefail
+          echo "Running test script with SAVE_PATH=${SAVE_PATH}"
+          python pull_fred_series_bulk_split_pivot_adaptive_test.py
+          echo "After run, tree:"
+          ls -lah .
+
+      - name: Collect output into outputs/
+        run: |
+          set -euo pipefail
+          # expected file name (as produced by the script)
+          EXPECT="fred_series_2019base.xlsx"
+          if [ -f "$EXPECT" ]; then
+            mv "$EXPECT" "outputs/$EXPECT"
+          else
+            # fallback: grab first xlsx we find
+            FOUND="$(find . -maxdepth 3 -type f -name '*.xlsx' | head -n1 || true)"
+            if [ -n "$FOUND" ]; then
+              echo "Found report at: $FOUND"
+              cp "$FOUND" "outputs/$(basename "$FOUND")"
+            else
+              echo "WARN: no .xlsx produced"
+            fi
+          fi
+          echo "Listing outputs/"
+          ls -lah outputs || true
+
+      - name: Upload outputs (artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fred-bulk-test-output
+          path: outputs/**
+          if-no-files-found: warn
+
+      - name: Debug dump on failure
+        if: failure()
+        run: |
+          echo "==== DEBUG DUMP BEGIN ===="
+          find . -maxdepth 3 -type f -printf "%p\t%k KB\n" | sort || true
+          echo "--- outputs/ ---"
+          ls -lah outputs || true
+          echo "Python & libs:"
+          python -c "import sys; print(sys.version)"
+          python - <<'PY'
+import pandas, numpy, openpyxl, statsmodels, xlsxwriter, fredapi
+print('pandas', pandas.__version__)
+print('numpy', numpy.__version__)
+print('openpyxl', openpyxl.__version__)
+print('statsmodels', statsmodels.__version__)
+print('xlsxwriter', xlsxwriter.__version__)
+print('fredapi', fredapi.__version__)
+PY
+          echo "==== DEBUG DUMP END ===="

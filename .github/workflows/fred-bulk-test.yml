@@ -39,10 +39,9 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
-          else
-            # Excel writer + HW/ARIMA need xlsxwriter & statsmodels
-            pip install pandas numpy fredapi statsmodels openpyxl xlsxwriter
           fi
+          # Ensure these are present even if requirements.txt omitted them:
+          pip install --upgrade pandas numpy fredapi statsmodels openpyxl xlsxwriter
 
       - name: Prepare outputs dir
         run: |
@@ -56,9 +55,14 @@ jobs:
           echo "Python files:"
           find . -maxdepth 2 -type f -name "*.py" -print
 
-      - name: Verify test script exists
+      - name: Verify test script exists and is Python
         run: |
-          test -f pull_fred_series_bulk_split_pivot_adaptive_test.py || { echo "ERROR: pull_fred_series_bulk_split_pivot_adaptive_test.py not found"; exit 1; }
+          set -euo pipefail
+          test -f pull_fred_series_bulk_split_pivot_adaptive_test.py || { echo "ERROR: test script not found"; exit 1; }
+          head -n 1 pull_fred_series_bulk_split_pivot_adaptive_test.py | grep -E '^(#|from|import)' >/dev/null || {
+            echo "ERROR: The test script's first line isn't Python (did you paste YAML into it?)"
+            exit 1
+          }
 
       - name: Run bulk pull (test)
         env:

@@ -1,7 +1,7 @@
 name: FRED Bulk Pull (Test)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
   # schedule:
   #   - cron: "0 12 * * 1"   # optional: Mondays @ 12:00 UTC
 
@@ -105,13 +105,10 @@ jobs:
           ls -lah outputs || true
           echo "Python & libs:"
           python -c "import sys; print(sys.version)"
-          python - <<'PY'
-import pandas, numpy, openpyxl, statsmodels, xlsxwriter, fredapi
-print('pandas', pandas.__version__)
-print('numpy', numpy.__version__)
-print('openpyxl', openpyxl.__version__)
-print('statsmodels', statsmodels.__version__)
-print('xlsxwriter', xlsxwriter.__version__)
-print('fredapi', fredapi.__version__)
-PY
+          python -c "import pandas as p; print('pandas', p.__version__)"
+          python -c "import numpy as n; print('numpy', n.__version__)"
+          python -c "import openpyxl as o; print('openpyxl', o.__version__)"
+          python -c "import statsmodels as s; print('statsmodels', s.__version__)"
+          python -c "import xlsxwriter as x; print('xlsxwriter', x.__version__)"
+          python -c "import fredapi as f; print('fredapi', f.__version__)"
           echo "==== DEBUG DUMP END ===="

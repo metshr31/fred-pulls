@@ -1,11 +1,11 @@
-name: FRED Bulk Test
+name: FRED Bulk Pull (Test)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
   push:
     paths:
-      - ".github/workflows/fred-bulk-test.yml"
       - "pull_fred_series_bulk_split_pivot_adaptive_test.py"
+      - ".github/workflows/fred-bulk-test.yml"
       - "requirements.txt"
 
 permissions:
@@ -16,12 +16,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  run-test:
     runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash
     env:
+      PYTHONUNBUFFERED: "1"
       SAVE_PATH: outputs
 
     steps:
@@ -40,17 +41,18 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            # minimal deps for the smoke test
-            pip install pandas numpy fredapi XlsxWriter
+            pip install fredapi pandas numpy XlsxWriter requests python-dateutil pytz tzdata
           fi
 
       - name: Prepare outputs dir
         run: |
-          rm -rf "${SAVE_PATH}"
-          mkdir -p "${SAVE_PATH}"
+          set -euo pipefail
+          rm -rf outputs
+          mkdir -p outputs
 
       - name: Show repo layout (debug)
         run: |
+          set -euo pipefail
           echo "PWD: $(pwd)"
           ls -lah
           echo "Python files:"
@@ -62,22 +64,45 @@ jobs:
 
       - name: Run test script
         env:
-          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}  # optional; script works without it
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: |
           set -euo pipefail
           echo "Running test script with SAVE_PATH=${SAVE_PATH}"
           python pull_fred_series_bulk_split_pivot_adaptive_test.py
           echo "After run, tree:"
           ls -lah
-          echo "Listing ${SAVE_PATH}/"
-          ls -lah "${SAVE_PATH}" || true
+          echo "Listing outputs/"
+          ls -lah outputs || true
+
+      - name: Collect Excel into outputs
+        run: |
+          set -euo pipefail
+          if [ -f fred_series_2019base.xlsx ]; then
+            echo "Moving fred_series_2019base.xlsx into outputs/"
+            mv fred_series_2019base.xlsx outputs/fred_series_2019base.xlsx
+          else
+            echo "WARNING: fred_series_2019base.xlsx not found at repo root"
+            ls -lah
+          fi
+          echo "Contents of outputs/:"
+          ls -lah outputs || true
 
       - name: Upload outputs (artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fred-bulk-test-output
-          path: |
-            outputs/**
-            fred_series_2019base.xlsx
+          path: outputs/**
           if-no-files-found: warn
+
+      - name: Debug dump on failure
+        if: failure()
+        run: |
+          echo "==== DEBUG DUMP BEGIN ===="
+          find . -maxdepth 3 -type f -printf "%p\t%k KB\n" | sort || true
+          echo "--- outputs/ ---"
+          ls -lah outputs || true
+          echo "Python & libs:"
+          python -c "import sys; print(sys.version)"
+          python -c "import pandas, numpy; print('pandas', pandas.__version__); print('numpy', numpy.__version__)"
+          echo "==== DEBUG DUMP END ===="

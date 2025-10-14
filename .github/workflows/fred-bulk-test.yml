@@ -1,9 +1,12 @@
 name: FRED Bulk Pull (Test)
 
 on:
-  workflow_dispatch:        # manual "Run workflow" button
-  # schedule:
-  #   - cron: "0 12 * * *"  # optional: runs daily at 12:00 UTC
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/fred-bulk-test.yml"
+      - "pull_fred_series_bulk_split_pivot_adaptive_test.py"
+      - "requirements.txt"
 
 permissions:
   contents: read
@@ -13,7 +16,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -40,19 +43,17 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            # Ensure Excel + statsmodels are available
-            pip install fredapi pandas numpy openpyxl xlsxwriter scipy scikit-learn matplotlib statsmodels
+            # Minimal set needed by your test script
+            pip install fredapi pandas numpy openpyxl xlsxwriter scipy statsmodels matplotlib
           fi
 
       - name: Prepare outputs dir
         run: |
-          set -euo pipefail
           rm -rf outputs
           mkdir -p outputs
 
       - name: Show repo layout (debug)
         run: |
-          set -euo pipefail
           echo "PWD: $(pwd)"
           ls -lah
           echo "Python files:"
@@ -60,28 +61,17 @@ jobs:
 
       - name: Verify test script exists
         run: |
-          set -euo pipefail
           test -f pull_fred_series_bulk_split_pivot_adaptive_test.py || { echo "ERROR: pull_fred_series_bulk_split_pivot_adaptive_test.py not found"; exit 1; }
 
-      - name: Run bulk pull (test)
+      - name: Run test script
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: |
           set -euo pipefail
           echo "Running test script with SAVE_PATH=${SAVE_PATH}"
-          python pull_fred_series_bulk_split_pivot_adaptive_test.py
+          python -X dev pull_fred_series_bulk_split_pivot_adaptive_test.py
           echo "After run, tree:"
-          ls -lah .
-
-      - name: Collect output into outputs/
-        run: |
-          set -euo pipefail
-          EXPECT="fred_series_2019base.xlsx"
-          if [ -f "$EXPECT" ]; then
-            mv "$EXPECT" "outputs/$EXPECT"
-          fi
-          # also pick up any additional .xlsx/.png emitted
-          find . -maxdepth 1 -type f \( -name '*.xlsx' -o -name '*.png' \) -not -path './outputs/*' -exec cp {} outputs/ \;
+          ls -lah
           echo "Listing outputs/"
           ls -lah outputs || true
 
@@ -90,23 +80,25 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fred-bulk-test-output
-          path: outputs/**
+          path: |
+            outputs/**
+            *.xlsx
           if-no-files-found: warn
 
       - name: Debug dump on failure
         if: failure()
+        shell: bash
         run: |
           echo "==== DEBUG DUMP BEGIN ===="
           find . -maxdepth 3 -type f -printf "%p\t%k KB\n" | sort || true
           echo "--- outputs/ ---"
           ls -lah outputs || true
-          echo "Python & libs:"
-          python -c "import sys; print(sys.version)"
-          python -c "import importlib, sys; mods=['pandas','numpy','openpyxl','xlsxwriter','scipy','statsmodels','fredapi','matplotlib']; \
-for m in mods: \
-  print(m, end=' '); \
-  try: \
-    mod=importlib.import_module(m); print(getattr(mod,'__version__','n/a')); \
-  except Exception as e: \
-    print('NOT INSTALLED:', e)"
+
+          echo "--- versions ---"
+          python -V || true
+          pip -V || true
+          for pkg in pandas numpy openpyxl xlsxwriter scipy statsmodels fredapi matplotlib; do
+            echo ">>> $pkg"
+            pip show "$pkg" || echo "$pkg: not installed"
+          done
           echo "==== DEBUG DUMP END ===="

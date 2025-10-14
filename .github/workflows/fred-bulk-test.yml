@@ -1,4 +1,4 @@
-name: FRED Bulk Pull (Test)
+name: FRED Bulk Test
 
 on:
   workflow_dispatch:
@@ -16,15 +16,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash
     env:
-      PYTHONFAULTHANDLER: "1"
-      PYTHONUNBUFFERED: "1"
-      MPLBACKEND: Agg
       SAVE_PATH: outputs
 
     steps:
@@ -43,14 +40,14 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            # Minimal set needed by your test script
-            pip install fredapi pandas numpy openpyxl xlsxwriter scipy statsmodels matplotlib
+            # minimal deps for the smoke test
+            pip install pandas numpy fredapi XlsxWriter
           fi
 
       - name: Prepare outputs dir
         run: |
-          rm -rf outputs
-          mkdir -p outputs
+          rm -rf "${SAVE_PATH}"
+          mkdir -p "${SAVE_PATH}"
 
       - name: Show repo layout (debug)
         run: |
@@ -61,19 +58,19 @@ jobs:
 
       - name: Verify test script exists
         run: |
-          test -f pull_fred_series_bulk_split_pivot_adaptive_test.py || { echo "ERROR: pull_fred_series_bulk_split_pivot_adaptive_test.py not found"; exit 1; }
+          test -f pull_fred_series_bulk_split_pivot_adaptive_test.py || { echo "ERROR: test script not found"; exit 1; }
 
       - name: Run test script
         env:
-          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}  # optional; script works without it
         run: |
           set -euo pipefail
           echo "Running test script with SAVE_PATH=${SAVE_PATH}"
-          python -X dev pull_fred_series_bulk_split_pivot_adaptive_test.py
+          python pull_fred_series_bulk_split_pivot_adaptive_test.py
           echo "After run, tree:"
           ls -lah
-          echo "Listing outputs/"
-          ls -lah outputs || true
+          echo "Listing ${SAVE_PATH}/"
+          ls -lah "${SAVE_PATH}" || true
 
       - name: Upload outputs (artifact)
         if: always()
@@ -82,23 +79,5 @@ jobs:
           name: fred-bulk-test-output
           path: |
             outputs/**
-            *.xlsx
+            fred_series_2019base.xlsx
           if-no-files-found: warn
-
-      - name: Debug dump on failure
-        if: failure()
-        shell: bash
-        run: |
-          echo "==== DEBUG DUMP BEGIN ===="
-          find . -maxdepth 3 -type f -printf "%p\t%k KB\n" | sort || true
-          echo "--- outputs/ ---"
-          ls -lah outputs || true
-
-          echo "--- versions ---"
-          python -V || true
-          pip -V || true
-          for pkg in pandas numpy openpyxl xlsxwriter scipy statsmodels fredapi matplotlib; do
-            echo ">>> $pkg"
-            pip show "$pkg" || echo "$pkg: not installed"
-          done
-          echo "==== DEBUG DUMP END ===="

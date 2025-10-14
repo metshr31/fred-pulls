@@ -1,9 +1,9 @@
 name: FRED Bulk Pull (Test)
 
 on:
-  workflow_dispatch: {}          # manual “Run workflow” button
+  workflow_dispatch: {}
   # schedule:
-  #   - cron: "0 12 * * 1"       # (optional) Mondays @ 12:00 UTC
+  #   - cron: "0 12 * * 1"   # optional: Mondays @ 12:00 UTC
 
 permissions:
   contents: read
@@ -40,7 +40,7 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            # include xlsxwriter & statsmodels; they’re required for Excel + HW/ARIMA
+            # Excel writer + HW/ARIMA need xlsxwriter & statsmodels
             pip install pandas numpy fredapi statsmodels openpyxl xlsxwriter
           fi
 
@@ -73,12 +73,10 @@ jobs:
       - name: Collect output into outputs/
         run: |
           set -euo pipefail
-          # expected file name (as produced by the script)
           EXPECT="fred_series_2019base.xlsx"
           if [ -f "$EXPECT" ]; then
             mv "$EXPECT" "outputs/$EXPECT"
           else
-            # fallback: grab first xlsx we find
             FOUND="$(find . -maxdepth 3 -type f -name '*.xlsx' | head -n1 || true)"
             if [ -n "$FOUND" ]; then
               echo "Found report at: $FOUND"

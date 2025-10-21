@@ -16,15 +16,12 @@ CN_METRICS_PAGE = "https://www.cn.ca/en/investors/key-weekly-metrics/"
 CSX_CDN_BASE = "https://s2.q4cdn.com/859568992/files/doc_downloads"
 CPKC_CDN_BASE = "https://s21.q4cdn.com/736796105/files/doc_downloads"
 CPKC_53WEEK_FILENAME = "CPKC-53-Week-Railway-Performance-Report.xlsx"
-UP_STATIC = {
-    "RTM_Carloadings": "https://investor.unionpacific.com/static-files/42fe7816-51a0-4844-9e24-ab51fb378299",
-    "Performance_Measures": "https://investor.unionpacific.com/static-files/cedd1572-83c5-49e4-9bc2-753e75ed6814",
-}
+# UP_STATIC removed
 NS_REPORTS_PAGE = "https://norfolksouthern.investorroom.com/weekly-performance-reports"
 BNSF_REPORTS_PAGE = "https://www.bnsf.com/about-bnsf/financial-information/weekly-carload-reports/"
 DOWNLOAD_FOLDER = os.getenv("STB_LOG_DIR", os.getcwd())
-TIMEOUT_DEFAULT = 15
-TIMEOUT_UP = 30  # UP is slow
+TIMEOUT_DEFAULT = 15 # Lowered as suggested in previous discussion
+TIMEOUT_UP = 30      # Lowered, but will not be used
 UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) excel-fetcher",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -55,10 +52,11 @@ def http_get(url: str, timeout: Union[int, None] = None, referer: Union[str, Non
              retries: int = 3, backoff: int = 5) -> requests.Response:
     headers = dict(UA)
     if referer: headers["Referer"] = referer
-    t = TIMEOUT_UP if "unionpacific.com" in url else (timeout or TIMEOUT_DEFAULT)
+    # TIMEOUT_UP check simplified since UP is removed, but we keep the structure for safety
+    t = (timeout or TIMEOUT_DEFAULT) 
+    
     for attempt in range(1, retries + 1):
         try:
-            # Added stream=False to prevent issues with slow downloads not hitting timeout
             r = requests.get(url, headers=headers, timeout=t, allow_redirects=True, stream=False)
             r.raise_for_status()
             return r
@@ -136,15 +134,12 @@ def download_cn_rtm() -> List[str]:
     return saved
 
 # =========================
-# CPKC (UPDATED)
+# CPKC
 # =========================
 def _discover_cpkc_cdn_url(filename: str, max_back_days: int = 60) -> str:
     """
     Probe CPKC's CDN for a given filename by walking back in time and trying both
-    folder layouts that appear on s21.q4cdn.com:
-      - /YYYY/MM/DD/filename
-      - /YYYY/MM/filename
-    Returns the first URL that responds OK to HEAD. Max_back_days increased to 60.
+    folder layouts that appear on s21.q4cdn.com.
     """
     today = dt.date.today()
     for delta in range(max_back_days):
@@ -159,10 +154,8 @@ def _discover_cpkc_cdn_url(filename: str, max_back_days: int = 60) -> str:
 
 def download_cpkc_53week() -> str:
     """
-    Grab the '53 Week Railway Performance' report from the CPKC CDN, handling
-    both /YYYY/MM/DD and /YYYY/MM folder styles.
+    Grab the '53 Week Railway Performance' report from the CPKC CDN.
     """
-    # Using the constant defined in the Config section
     filename = CPKC_53WEEK_FILENAME 
     url = _discover_cpkc_cdn_url(filename, max_back_days=60)
     resp = http_get(url)
@@ -170,7 +163,7 @@ def download_cpkc_53week() -> str:
 
 def download_cpkc_rtm() -> str:
     """
-    FIX: Now checks for the new 'Combined' file name first, then the old,
+    Now checks for the new 'Combined' file name first, then the old,
     using the highest plausible numeric suffix first to find the newest revision.
     """
     year = dt.date.today().year
@@ -192,7 +185,6 @@ def download_cpkc_rtm() -> str:
     last_error = None
     for fname in candidates:
         try:
-            # Use the robust discovery function
             url = _discover_cpkc_cdn_url(fname, max_back_days=60)
             resp = http_get(url)
             # Save using the specific filename found
@@ -204,16 +196,15 @@ def download_cpkc_rtm() -> str:
     raise FileNotFoundError(f"❌ CPKC RTM file not found with any candidate name. Last error: {last_error}")
 
 # =========================
-# CSX Excel (Historical_Data only) (UPDATED)
+# CSX Excel (Historical_Data only)
 # =========================
 def discover_csx_historical(max_back_weeks: int = 12) -> str:
     """
-    FIX: Searches for the specific Week/Year file AND the generic 'Historical_Data.xlsx' 
+    Searches for the specific Week/Year file AND the generic 'Historical_Data.xlsx' 
     file, across a 14-day posting window.
     """
     today = dt.date.today()
-    iso_year, iso_week, _ = today.isocalendar()
-
+    
     # The outer loop rolls back the ISO week number for the FILENAME
     for delta in range(max_back_weeks):
         # Calculate the year and week we are looking for (Week 43, 42, 41...)
@@ -247,11 +238,11 @@ def download_csx() -> str:
     return save_bytes(resp.content, fname)
 
 # =========================
-# CSX AAR (PDF) (UPDATED)
+# CSX AAR (PDF)
 # =========================
 def download_csx_aar(max_back_weeks: int = 12) -> str:
     """
-    FIX: Searches three possible URL structures for the AAR PDF, starting with the 
+    Searches three possible URL structures for the AAR PDF, starting with the 
     most recent ISO week.
     """
     today = dt.date.today()
@@ -280,16 +271,9 @@ def download_csx_aar(max_back_weeks: int = 12) -> str:
     raise FileNotFoundError(f"❌ No CSX AAR PDF found in last {max_back_weeks} weeks.")
 
 # =========================
-# UP
+# UP (REMOVED)
 # =========================
-def download_up() -> List[str]:
-    saved = []
-    for label, url in UP_STATIC.items():
-        print(f"⬇️ UP {label}")
-        resp = http_get(url, timeout=TIMEOUT_UP, retries=3)
-        saved.append(save_bytes(resp.content, f"UP_{label}_{datestamp()}.xlsx"))
-        time.sleep(0.5)
-    return saved
+# The download_up() function has been removed.
 
 # =========================
 # NS
@@ -346,7 +330,7 @@ def download_ns() -> List[str]:
 def download_bnsf() -> str:
     """
     Downloads the latest BNSF Weekly Surface Transportation Board Update Excel file
-    from https://www.bnsf.com/news-media/customer-notifications/notification.page?notId=weekly-surface-transportation-board-update
+    from the BNSF customer notifications page.
     """
     url = "https://www.bnsf.com/news-media/customer-notifications/notification.page?notId=weekly-surface-transportation-board-update"
     base = "https://www.bnsf.com"
@@ -379,7 +363,7 @@ def download_all():
         ("CPKC Weekly RTM", download_cpkc_rtm),
         ("CSX Excel", download_csx),
         ("CSX AAR", download_csx_aar),
-        ("UP", download_up),
+        # Removed ("UP", download_up)
         ("NS", download_ns),
         ("BNSF", download_bnsf),
     ]

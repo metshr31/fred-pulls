@@ -23,8 +23,8 @@ UP_STATIC = {
 NS_REPORTS_PAGE = "https://norfolksouthern.investorroom.com/weekly-performance-reports"
 BNSF_REPORTS_PAGE = "https://www.bnsf.com/about-bnsf/financial-information/weekly-carload-reports/"
 DOWNLOAD_FOLDER = os.getenv("STB_LOG_DIR", os.getcwd())
-TIMEOUT_DEFAULT = 20
-TIMEOUT_UP = 60  # UP is slow
+TIMEOUT_DEFAULT = 15
+TIMEOUT_UP = 30  # UP is slow
 UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) excel-fetcher",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",

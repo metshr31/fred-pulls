@@ -38,6 +38,8 @@ def datestamp() -> str:
     return dt.date.today().strftime("%Y-%m-%d")
 
 def sanitize_filename(name: str) -> str:
+    # Original: return re.sub(r"[^\w\-.]+", "_", name)
+    # Using the more robust version from the working code
     return re.sub(r"[^\w\-.]+", "_", name)
 
 def save_bytes(content: bytes, filename: str) -> str:
@@ -53,7 +55,7 @@ def http_get(url: str, timeout: Union[int, None] = None, referer: Union[str, Non
     headers = dict(UA)
     if referer: headers["Referer"] = referer
     # TIMEOUT_UP check simplified since UP is removed, but we keep the structure for safety
-    t = (timeout or TIMEOUT_DEFAULT) 
+    t = (timeout or TIMEOUT_DEFAULT)
     
     for attempt in range(1, retries + 1):
         try:
@@ -134,77 +136,83 @@ def download_cn_rtm() -> List[str]:
     return saved
 
 # =========================
-# CPKC
+# CPKC (UPDATED)
 # =========================
-def _discover_cpkc_cdn_url(filename: str, max_back_days: int = 60) -> str:
+
+# Merged and updated logic from the working code's _discover_cpkc_weekly_rtm_url
+def _discover_cpkc_cdn_url(filename: str, max_back_days: int = 60, is_weekly_rtm: bool = False) -> str:
     """
-    Probe CPKC's CDN for a given filename by walking back in time and trying both
-    folder layouts that appear on s21.q4cdn.com.
+    Probe CPKC's CDN for a given filename by walking back in time and trying relevant
+    folder layouts. Weekly RTM files use the 'key-metrics/weekly' path.
     """
+    WEEKLY_PATH = "key-metrics/weekly" if is_weekly_rtm else ""
     today = dt.date.today()
+    
     for delta in range(max_back_days):
         d = today - dt.timedelta(days=delta)
-        # Try both folder patterns for each day we probe
-        for folder in (d.strftime("%Y/%m/%d"), d.strftime("%Y/%m")):
-            url = f"{CPKC_CDN_BASE}/{folder}/{filename}"
+        
+        # Try both folder patterns for the dated files: YYYY/MM/DD and YYYY/MM
+        folder_patterns = [d.strftime("%Y/%m/%d"), d.strftime("%Y/%m")]
+        
+        # If it's the 53-week file, the path is often fixed and doesn't use the dated folders
+        if not is_weekly_rtm:
+            folder_patterns.insert(0, "") # Add a blank folder for the root level check
+
+        for folder in folder_patterns:
+            parts = [CPKC_CDN_BASE, WEEKLY_PATH, folder, filename]
+            # Filter out empty parts before joining
+            url = "/".join(part.strip("/") for part in parts if part)
+            
+            # Print probing only for the dynamic weekly check
+            if is_weekly_rtm:
+                print(f"      Probing: {url}")
+
             if http_head_ok(url):
                 print(f"✅ Found CPKC file at: {url}")
                 return url
+                
     raise FileNotFoundError(f"CPKC file ({filename}) not found in last {max_back_days} days.")
+
 
 def download_cpkc_53week() -> str:
     """
     Grab the '53 Week Railway Performance' report from the CPKC CDN.
+    Uses a simplified fixed path check from the updated logic.
     """
-    filename = CPKC_53WEEK_FILENAME 
-    url = _discover_cpkc_cdn_url(filename, max_back_days=60)
+    filename = CPKC_53WEEK_FILENAME
+    # The 53-week report is typically at a fixed path, so we use a non-weekly-rtm probe
+    url = _discover_cpkc_cdn_url(filename, max_back_days=1, is_weekly_rtm=False)
     resp = http_get(url)
     return save_bytes(resp.content, f"CPKC_53_Week_{datestamp()}.xlsx")
 
 def download_cpkc_rtm() -> str:
     """
-    Now checks for the new 'Combined' file name first, then the old,
-    using the highest plausible numeric suffix first to find the newest revision.
+    Downloads the dynamic CPKC Weekly RTMs and Carloads file, using the new logic
+    to find the correct dated folder. The old logic for filename suffixes is removed
+    as the new CDN structure appears to use a fixed name.
     """
-    year = dt.date.today().year
+    current_year = dt.date.today().year
+    filename = f"CPKC-Weekly-RTMs-and-Carloads-{current_year}.xlsx"
     
-    # NEW Combined pattern (prioritized)
-    base_new = f"CPKC-Combined-Weekly-RTMs-and-Carloads-{year}"
-    # OLD pattern (fallback)
-    base_old = f"CPKC-Weekly-RTMs-and-Carloads-{year}"
+    # Use the specific logic for weekly RTM files with the 'key-metrics/weekly' path
+    url = _discover_cpkc_cdn_url(filename, max_back_days=60, is_weekly_rtm=True)
+    resp = http_get(url)
+    
+    # Save using the specific filename found
+    return save_bytes(resp.content, sanitize_filename(f"CPKC_Weekly_RTM_{filename}"))
 
-    # Try candidates, prioritizing newer and the 'Combined' version
-    candidates = []
-    for k in range(9, 0, -1):
-        candidates.append(f"{base_new}-{k}.xlsx")
-    candidates.append(f"{base_new}.xlsx")
-    for k in range(9, 0, -1):
-        candidates.append(f"{base_old}-{k}.xlsx")
-    candidates.append(f"{base_old}.xlsx")
-
-    last_error = None
-    for fname in candidates:
-        try:
-            url = _discover_cpkc_cdn_url(fname, max_back_days=60)
-            resp = http_get(url)
-            # Save using the specific filename found
-            return save_bytes(resp.content, sanitize_filename(f"CPKC_Weekly_RTM_{fname}")) 
-        except Exception as e:
-            last_error = e
-            continue
-
-    raise FileNotFoundError(f"❌ CPKC RTM file not found with any candidate name. Last error: {last_error}")
 
 # =========================
-# CSX Excel (Historical_Data only)
+# CSX Excel (Historical_Data only) (UPDATED)
 # =========================
 def discover_csx_historical(max_back_weeks: int = 12) -> str:
     """
-    Searches for the specific Week/Year file AND the generic 'Historical_Data.xlsx' 
-    file, across a 14-day posting window.
+    Searches for multiple filename patterns across a 14-day posting window.
+    (Incorporates the robust logic from the working code)
     """
     today = dt.date.today()
-    
+    tried = []
+
     # The outer loop rolls back the ISO week number for the FILENAME
     for delta in range(max_back_weeks):
         # Calculate the year and week we are looking for (Week 43, 42, 41...)
@@ -224,51 +232,56 @@ def discover_csx_historical(max_back_weeks: int = 12) -> str:
 
             for fname in filenames:
                 url = f"{CSX_CDN_BASE}/{folder}/{fname}"
+                tried.append(url)
+                print(f"      Probing: {url}")
                 if http_head_ok(url):
                     print(f"✅ Found CSX Historical Data: {url}")
                     return url
     
-    raise FileNotFoundError(f"❌ Could not find CSX Historical_Data file in the last {max_back_weeks} weeks.")
+    raise FileNotFoundError(f"❌ Could not find CSX Historical_Data file. Tried: {tried[-5:]} (and more)")
 
 def download_csx() -> str:
     url = discover_csx_historical()
     resp = http_get(url)
     # Use the discovered file name to save
-    fname = sanitize_filename(f"CSX_{os.path.basename(url)}") 
+    fname = sanitize_filename(f"CSX_Historical_{os.path.basename(url)}")
     return save_bytes(resp.content, fname)
 
 # =========================
-# CSX AAR (PDF)
+# CSX AAR (PDF) (UPDATED)
 # =========================
 def download_csx_aar(max_back_weeks: int = 12) -> str:
     """
-    Searches three possible URL structures for the AAR PDF, starting with the 
-    most recent ISO week.
+    Searches multiple possible URL structures for the AAR PDF, starting with the
+    most recent ISO week. (Incorporates the robust logic from the working code)
     """
     today = dt.date.today()
+    tried_urls = []
     
     for delta in range(max_back_weeks):
         d = today - dt.timedelta(weeks=delta)
         year, week, _ = d.isocalendar()
         
-        # Candidate URLs, from most common to fallbacks
+        # Candidate URLs, from most common to fallbacks (as seen in the working code)
         candidate_urls = [
             # 1. Primary expected location
             f"{CSX_CDN_BASE}/volume_trends/{year}/{year}-Week-{week}-AAR.pdf",
-            # 2. Direct link inside a recent daily folder (for posting lag)
+            # 2. Secondary location (Sometimes they drop the PDF right into the general file_downloads folder)
+            f"{CSX_CDN_BASE}/{year}-Week-{week}-AAR.pdf",
+            # 3. Third location: Direct link inside a recent daily folder (for posting lag)
             f"{CSX_CDN_BASE}/{d.strftime('%Y/%m/%d')}/{year}-Week-{week}-AAR.pdf",
-            # 3. Secondary general location (sometimes volume_trends is dropped)
-            f"{CSX_CDN_BASE}/{year}-Week-{week}-AAR.pdf" 
         ]
 
         for url in candidate_urls:
+            print(f"      Probing AAR: {url}")
+            tried_urls.append(url)
             if http_head_ok(url):
                 print(f"⬇️ CSX AAR PDF found: {url}")
                 resp = http_get(url)
                 fname = sanitize_filename(f"CSX_AAR_{year}-Week-{week}.pdf")
                 return save_bytes(resp.content, fname)
 
-    raise FileNotFoundError(f"❌ No CSX AAR PDF found in last {max_back_weeks} weeks.")
+    raise FileNotFoundError(f"❌ No CSX AAR PDF found in last {max_back_weeks} weeks. Tried {tried_urls[-5:]}")
 
 # =========================
 # UP (REMOVED)

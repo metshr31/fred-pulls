@@ -137,7 +137,7 @@ SERIES = {
     # --- Retail / Wholesale / Inventories (Monthly only) ---
     "RRSFS": "Advance Real Retail & Food Services (CPI-Adj)",
     "RSNSR": "Retail & Food Services (NSA)",
-    "MRTSSM454USS": "Retail Sales: Nonstore (SA, Monthly)",
+    "MRTSSM454US": "Retail Sales: Nonstore (SA, Monthly)",
     "RETAILIRSA": "Retail Inventories/Sales Ratio (SA)",
     "WHLSLRIRSA": "Wholesale Inventories/Sales Ratio (SA)",
     "BUSINV": "Total Business Inventories",
@@ -629,3 +629,4 @@ if not SUMMARY_ROWS:
 else:
     print(f"OK: Saved {len(SUMMARY_ROWS)} forecasts to 'Summary_Forecasts' and 'All_Forecast_Data'.")
 print(f"-> Total runtime: {elapsed:.1f} seconds ({elapsed/60:.2f} minutes)")
+

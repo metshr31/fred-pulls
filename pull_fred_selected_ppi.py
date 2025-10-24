@@ -22,7 +22,7 @@ TOP_K_EXOG          = 10
 MAX_LAG_MONTHS      = 12
 AR_P                = 6
 CAL_WINDOW_MONTHS   = 18
-MC_SIMS             = 200
+MC_SIMS             = 5000
 
 # Env key
 FRED_API_KEY = os.environ.get("FRED_API_KEY")

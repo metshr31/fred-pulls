@@ -27,17 +27,19 @@ if identity:
 # CONFIGURATION
 ###############################################################################
 
-# Forms to monitor. Core US forms + foreign equivalents + "skeptical" capital raise docs
-FORMS_WE_CARE_ABOUT = {
+# Core (surface) forms to show in bullets if they pass the score bar
+CORE_FORMS = {
     # Core US / domestic ops & strategy
-    "8-K", "10-Q", "10-K", "S-4", "S-4/A",
+    "8-K", "10-Q", "10-K", "S-4",
     # High-value foreign filers
     "6-K", "20-F",
-    # Skeptical but allowed (only surface if they talk freight explicitly)
+    # Amended variants are common and often material
+    "8-K/A", "10-Q/A", "10-K/A", "6-K/A", "20-F/A", "S-4/A",
+    # Skeptical capital-market docs we still allow if they truly talk freight
     "424B", "424B1", "424B2", "424B3", "424B4", "424B5",
-    "FWP",
-    "S-1", "S-1/A",
-    "S-3", "S-3/A",
+    "FWP", "S-1", "S-1/A", "S-3", "S-3/A",
+    # Optional: 425 (M&A comms) — can impact networks. We include but penalize.
+    "425",
 }
 
 # Direct freight / logistics / network language
@@ -78,8 +80,7 @@ DIRECT_KEYWORDS = {
     r"\binterchange\b": 2,
 }
 
-# Indirect freight demand / cost / capacity signals
-# (Expanded to capture broader US economic signals that often precede freight moves)
+# Indirect US-economy / sector signals (expanded)
 CONTEXT_KEYWORDS = {
     # Industrial production / manufacturing cycle
     r"\bindustrial production\b": 3,
@@ -202,22 +203,17 @@ CONTEXT_KEYWORDS = {
 
 # Paired concepts that say "this is a freight capacity / flow story"
 PAIR_RULES = [
-    # Industrial output + transport stress
     (r"\bmanufactur(ing|er|ed)\b", r"\btransportation cost(s)?\b", 3),
     (r"\bMexico\b", r"\bcapacity constraint(s)?\b", 3),
     (r"\bnearshor(e|ing)\b", r"\bcross[- ]border\b", 3),
     (r"\bMexico\b", r"\bdriver shortage\b", 3),
-    # Inventory + DC flow
     (r"\binventor(y|ies)\b", r"\bdistribution center\b", 2),
     (r"\binventor(y|ies)\b", r"\bwarehouse(s|ing)?\b", 2),
     (r"\bfulfillment\b", r"\bDC network\b", 3),
-    # Port/terminal congestion + trade
     (r"\bport congestion\b", r"\bimport(s|ed|ing)\b", 3),
     (r"\bterminal congestion\b", r"\bexport(s|ed|ing)?\b", 3),
-    # Truck pricing pressure
     (r"\bfuel surcharge\b", r"\blinehaul\b", 4),
     (r"\bfuel surcharge\b", r"\blinehaul cost\b", 4),
-    # Labor / node shutdown
     (r"\bwork stoppage\b", r"\bterminal(s)?\b", 3),
     (r"\bstrike\b", r"\bwarehouse(s|ing)?\b", 2),
     (r"\bstrike\b", r"\bplant\b", 2),
@@ -231,7 +227,7 @@ CORE_FREIGHT_WATCHLIST = [
     "TFI International","Landstar System","Matson","Kirby Corporation","Kirby Corp","C.H. Robinson","CH Robinson","C H Robinson",
 ]
 
-# Mode "lenses" so we can say who should care
+# Mode "lenses"
 MODE_TAGS = [
     ("Rail / Intermodal", [
         r"\brail\b", r"\brailroad\b", r"\bintermodal\b", r"\bchassis\b",
@@ -310,7 +306,6 @@ def guess_mode_tags(text: str):
         for p in patterns:
             if re.search(p, text, flags=re.IGNORECASE):
                 tags.append(label); break
-    # de-dupe while preserving order
     final = []
     for t in tags:
         if t not in final:
@@ -318,12 +313,12 @@ def guess_mode_tags(text: str):
     return final
 
 def form_signal_adjustment(form_type: str) -> int:
-    # 8-K/6-K: +1; 10-Q/10-K/20-F: 0; S-4 neutral; capital-raise forms: -1
-    if form_type in ("8-K", "6-K"): return 1
-    if form_type in ("10-Q", "10-K", "20-F"): return 0
+    # 8-K/6-K: +1; 10-Q/10-K/20-F: 0; S-4 neutral; capital-raise forms & 425: -1
+    if form_type in ("8-K", "6-K", "8-K/A", "6-K/A"): return 1
+    if form_type in ("10-Q", "10-K", "20-F", "10-Q/A", "10-K/A", "20-F/A"): return 0
     if form_type in ("S-4", "S-4/A"): return 0
     if (form_type.startswith("424B")
-        or form_type in ("FWP", "S-1", "S-1/A", "S-3", "S-3/A")): return -1
+        or form_type in ("FWP", "S-1", "S-1/A", "S-3", "S-3/A", "425")): return -1
     return 0
 
 def find_relevant_snippet(text: str, patterns: list[str], window: int = 220) -> str:
@@ -377,23 +372,25 @@ def main():
     filings = get_current_filings()  # keep the tight recency window
 
     hits = []
-    candidates = []  # for recall floor
+    candidates = []          # all filings with scores (for recall floor)
     bullet_blocks = []
 
     os.makedirs("output", exist_ok=True)
     os.makedirs("output/full_text", exist_ok=True)
 
-    # Pre-build snippet patterns list once
+    # snippet patterns
     snippet_patterns = list(DIRECT_KEYWORDS.keys()) + list(CONTEXT_KEYWORDS.keys())
     for a, b, _w in PAIR_RULES:
         snippet_patterns.append(a); snippet_patterns.append(b)
     snippet_patterns = list(dict.fromkeys(snippet_patterns))
 
-    for f in filings:
-        form = getattr(f, "form_type", "") or ""
-        if form not in FORMS_WE_CARE_ABOUT:
-            continue
+    total_seen = 0
+    total_core_form = 0
 
+    for f in filings:
+        total_seen += 1
+
+        form = getattr(f, "form_type", "") or ""
         company_name = getattr(f, "company_name", "") or ""
         ticker = getattr(f, "ticker", "") or ""
         filed_at = getattr(f, "filed", "")
@@ -404,7 +401,7 @@ def main():
         except Exception:
             body_text = ""
 
-        # --- scoring ---
+        # --- scoring (for ALL filings, even off-form) ---
         direct_pts  = weighted_keyword_score(company_name, DIRECT_KEYWORDS) \
                     + weighted_keyword_score(body_text, DIRECT_KEYWORDS)
         context_pts = weighted_keyword_score(body_text, CONTEXT_KEYWORDS)
@@ -423,7 +420,6 @@ def main():
         modes = guess_mode_tags(body_text)
         snippet = find_relevant_snippet(body_text, snippet_patterns)
 
-        # record every candidate (for recall floor)
         cand = {
             "date_run": now.date().isoformat(),
             "company": company_name.strip(),
@@ -443,31 +439,32 @@ def main():
         }
         candidates.append(cand)
 
-        # thresholding for surfaced "hits"
-        if score < SCORE_THRESHOLD:
-            continue
+        # Only surface "core" forms if they pass the score bar
+        if form in CORE_FORMS:
+            total_core_form += 1
+            if score >= SCORE_THRESHOLD:
+                fulltext_path = None
+                if score >= FULLTEXT_THRESHOLD:
+                    base_pieces = [now.date().isoformat(), form, ticker if ticker else safe_slug(company_name)[:20]]
+                    base_name = "_".join(safe_slug(p) for p in base_pieces if p) + "_" + tiny_hash(url or company_name or "") + ".txt"
+                    fulltext_path = os.path.join("output", "full_text", base_name)
+                    with open(fulltext_path, "w", encoding="utf-8") as ffull:
+                        ffull.write(f"Company: {company_name}\nTicker: {ticker}\nForm: {form}\nFiled At: {filed_at}\nURL: {url}\nScore: {score}\n")
+                        ffull.write("\n=== BEGIN FILING TEXT ===\n\n")
+                        ffull.write(body_text)
 
-        fulltext_path = None
-        if score >= FULLTEXT_THRESHOLD:
-            base_pieces = [now.date().isoformat(), form, ticker if ticker else safe_slug(company_name)[:20]]
-            base_name = "_".join(safe_slug(p) for p in base_pieces if p) + "_" + tiny_hash(url or company_name or "") + ".txt"
-            fulltext_path = os.path.join("output", "full_text", base_name)
-            with open(fulltext_path, "w", encoding="utf-8") as ffull:
-                ffull.write(f"Company: {company_name}\nTicker: {ticker}\nForm: {form}\nFiled At: {filed_at}\nURL: {url}\nScore: {score}\n")
-                ffull.write("\n=== BEGIN FILING TEXT ===\n\n")
-                ffull.write(body_text)
-
-        cand_hit = dict(cand)
-        cand_hit["fulltext_file"] = fulltext_path if fulltext_path else ""
-        hits.append(cand_hit)
+                cand_hit = dict(cand)
+                cand_hit["fulltext_file"] = fulltext_path if fulltext_path else ""
+                hits.append(cand_hit)
 
     # Sort surfaced hits
     form_rank = {
-        "8-K": 1, "6-K": 1,
-        "10-Q": 2, "10-K": 2, "20-F": 2,
+        # rank lower is hotter
+        "8-K": 1, "6-K": 1, "8-K/A": 1, "6-K/A": 1,
+        "10-Q": 2, "10-K": 2, "20-F": 2, "10-Q/A": 2, "10-K/A": 2, "20-F/A": 2,
         "S-4": 3, "S-4/A": 3,
         "424B": 4, "424B1": 4, "424B2": 4, "424B3": 4, "424B4": 4, "424B5": 4,
-        "FWP": 4, "S-1": 4, "S-1/A": 4, "S-3": 4, "S-3/A": 4,
+        "FWP": 4, "S-1": 4, "S-1/A": 4, "S-3": 4, "S-3/A": 4, "425": 4,
     }
     def sort_key(item):
         if isinstance(item["filed_at"], datetime.datetime):
@@ -477,14 +474,15 @@ def main():
         return (-item["score"], form_rank.get(item["form"], 99), filed_str[::-1])
     hits.sort(key=sort_key)
 
-    # Human-readable report
+    # Build report
+    bullet_blocks = []
     bullet_blocks.append("🔎 SEC Filings With Freight / Supply Chain Impact (recent feed)\n")
 
     if not hits:
-        bullet_blocks.append("• No high-signal 8-K / 6-K / 10-Q / 10-K / 20-F / S-4 matched the freight/macro criteria above.\n")
+        bullet_blocks.append("• No high-signal core forms matched the freight/macro criteria above.\n")
 
-        # === Recall Floor: include Top-5 near-misses with generic macro/logistics stress ===
-        generic_pat = re.compile(r"\b(supply|inventory|production|capacity|port|logistics|warehouse|CapEx|construction)\b", re.I)
+        # === Recall Floor: include Top-5 near-misses from ALL forms ===
+        generic_pat = re.compile(r"\b(supply|inventory|production|capacity|port|logistics|warehouse|CapEx|construction|PMI|ISM|retail)\b", re.I)
         near = []
         for c in candidates:
             text_for_check = " ".join([
@@ -497,11 +495,12 @@ def main():
         near.sort(key=lambda x: -x["score"])
         near = near[:5]
         if near:
-            bullet_blocks.append("🔁 Recall floor — notable near-misses (for manual review):\n")
+            bullet_blocks.append("🔁 Recall floor — notable near-misses (manual review suggested):\n")
             for c in near:
+                off_form_tag = "" if c["form"] in CORE_FORMS else " (off-form)"
                 bullet_blocks.append(
                     summarize_for_newsletter(
-                        company=c["company"], ticker=c["ticker"], form=c["form"],
+                        company=c["company"], ticker=c["ticker"], form=c["form"]+off_form_tag,
                         filed_at=c["filed_at"], url=c["url"],
                         rationale=f"(near-miss) score={c['score']} [direct={c['direct_pts']} context={c['context_pts']} pairs={c['combo_pts']} form={c['form_adj']} boost={c['boost_pts']}] — {c['rationale']}",
                         tags=c["tags"], snippet=c["snippet"], fulltext_path_if_any=""
@@ -520,9 +519,14 @@ def main():
                 )
             )
 
-    bullet_blocks.append(f"[internal note: surfaced {len(hits)}; SCORE_THRESHOLD={SCORE_THRESHOLD}; FULLTEXT_THRESHOLD={FULLTEXT_THRESHOLD}]")
+    bullet_blocks.append(
+        f"[internal note: surfaced {len(hits)}; "
+        f"total_seen={total_seen}; total_core_form={total_core_form}; "
+        f"SCORE_THRESHOLD={SCORE_THRESHOLD}; FULLTEXT_THRESHOLD={FULLTEXT_THRESHOLD}]"
+    )
 
     # Write outputs
+    os.makedirs("output", exist_ok=True)
     with open("output/freight_pulse_sec_raw.txt", "w", encoding="utf-8") as ftxt:
         ftxt.write("\n".join(bullet_blocks))
 
@@ -536,17 +540,21 @@ def main():
                 "rationale","mode_tags","snippet","url","fulltext_file",
                 "direct_pts","context_pts","combo_pts","boost_pts","form_adj"
             ])
-        # write surfaced hits; if none, log the top near-misses instead (so CSV stays useful)
+
+        # always log surfaced hits if any, else log recall-floor near-misses
         rows = hits
         if not rows:
             rows = near if 'near' in locals() else []
         for h in rows:
             writer.writerow([
-                now.date().isoformat(), h["company"], h["ticker"], h["form"], h["filed_at"], h["score"],
-                h["rationale"], "; ".join(h["tags"]), h["snippet"], h["url"], h.get("fulltext_file",""),
+                now.date().isoformat(), h["company"], h["ticker"], h["form"],
+                h["filed_at"], h["score"], h["rationale"],
+                "; ".join(h["tags"]), h["snippet"], h["url"],
+                h.get("fulltext_file",""),
                 h["direct_pts"], h["context_pts"], h["combo_pts"], h["boost_pts"], h["form_adj"]
             ])
 
+    # Print to stdout for Actions logs
     print("\n".join(bullet_blocks))
 
 if __name__ == "__main__":

@@ -5,7 +5,16 @@ import re
 import csv
 import textwrap
 import hashlib
-from edgartools import Filings
+import sys
+
+# IMPORTANT: the import is "edgar", not "edgartools"
+try:
+    from edgar import get_current_filings
+except Exception as e:
+    print("ERROR: Could not import 'edgar'. "
+          "Make sure requirements.txt includes 'edgartools' and it installed successfully.\n"
+          f"Underlying import error: {e}", file=sys.stderr)
+    raise
 
 ###############################################################################
 # CONFIGURATION
@@ -312,7 +321,7 @@ def form_signal_adjustment(form_type: str) -> int:
 def find_relevant_snippet(text: str, patterns: list[str], window: int = 220) -> str:
     """
     Extract 1-2 sentence 'evidence' around the first interesting match.
-    This is what Ari (and ChatGPT) will quote.
+    This is what you'll quote in Freight Pulse.
     """
     if not text:
         return ""
@@ -379,15 +388,9 @@ def summarize_for_newsletter(company, ticker, form, filed_at, url, rationale, ta
 
 def main():
     now = datetime.datetime.now(timezone.utc)
-    since = now - timedelta(days=1)
+    # get_current_filings() already represents the most recent batch (≈ last 24h window)
+    filings = get_current_filings()
 
-    # Pull filings between [now-1d, now]
-    filings = Filings().get_filings(
-        start_date=since.date(),
-        end_date=now.date()
-    )
-
-    # We'll accumulate these to output
     hits = []
     bullet_blocks = []
 
@@ -396,6 +399,8 @@ def main():
     os.makedirs("output/full_text", exist_ok=True)
 
     for f in filings:
+        # Expected attributes from edgar filings objects:
+        #   f.form_type, f.company_name, f.ticker, f.filed, f.primary_document_url, f.text()
         form = getattr(f, "form_type", "") or ""
         if form not in FORMS_WE_CARE_ABOUT:
             continue
@@ -431,33 +436,28 @@ def main():
             rationale_bits.append("macro driver (inventory, industrial output, steel/chemicals, cold storage, Mexico)")
         if combo_pts:
             rationale_bits.append("paired signal (production + transport stress, border + capacity, etc.)")
-        # note: form_adj is already reflected in score, but we won't narrate "this was a 6-K"
         rationale = "; ".join(rationale_bits) if rationale_bits else "logistics-adjacent operational signal"
 
         # --- mode tagging ---
         modes = guess_mode_tags(body_text)
 
-        # --- snippet extraction for preview ---
+        # --- snippet extraction ---
         snippet_patterns = list(DIRECT_KEYWORDS.keys()) + list(CONTEXT_KEYWORDS.keys())
         for a, b, _w in PAIR_RULES:
             snippet_patterns.append(a)
             snippet_patterns.append(b)
-        # dedupe
         snippet_patterns = list(dict.fromkeys(snippet_patterns))
-
         snippet = find_relevant_snippet(body_text, snippet_patterns)
 
-        # Should we surface this filing at all?
+        # --- thresholds ---
         should_surface = score >= SCORE_THRESHOLD
         if not should_surface:
             continue
 
-        # Should we dump full text to disk for this filing?
         should_dump_fulltext = score >= FULLTEXT_THRESHOLD
 
         fulltext_path = None
         if should_dump_fulltext:
-            # Build stable-ish filename
             base_pieces = [
                 now.date().isoformat(),
                 form,
@@ -478,7 +478,6 @@ def main():
                 ffull.write("\n=== BEGIN FILING TEXT ===\n\n")
                 ffull.write(body_text)
 
-        # Save hit metadata for output files and CSV log
         hits.append({
             "date_run": now.date().isoformat(),
             "company": company_name.strip(),
@@ -493,10 +492,7 @@ def main():
             "fulltext_file": fulltext_path if should_dump_fulltext else "",
         })
 
-    # Sort hits to make the human-readable report nice:
-    # 1. higher score first
-    # 2. "hotter" forms first (8-K/6-K/10-Q/10-K/20-F over others)
-    # 3. recency-ish tie breaker
+    # Sort for readability
     form_rank = {
         "8-K": 1, "6-K": 1,
         "10-Q": 2, "10-K": 2, "20-F": 2,
@@ -518,8 +514,8 @@ def main():
 
     hits.sort(key=sort_key)
 
-    # Build the .txt "daily brief" for you (the one you upload to ChatGPT)
-    bullet_blocks.append("🔎 SEC Filings With Freight / Supply Chain Impact (last 24h)\n")
+    # Human-readable report
+    bullet_blocks.append("🔎 SEC Filings With Freight / Supply Chain Impact (recent feed)\n")
 
     if not hits:
         bullet_blocks.append(
@@ -545,11 +541,10 @@ def main():
         f"[internal note: surfaced {len(hits)}; SCORE_THRESHOLD={SCORE_THRESHOLD}; FULLTEXT_THRESHOLD={FULLTEXT_THRESHOLD}]"
     )
 
-    # Write the summary file (this is the "upload to ChatGPT" file)
+    # Write outputs
     with open("output/freight_pulse_sec_raw.txt", "w", encoding="utf-8") as ftxt:
         ftxt.write("\n".join(bullet_blocks))
 
-    # Append/update CSV archive for receipts and trend work
     csv_path = "output/freight_pulse_sec_full.csv"
     new_file = not os.path.exists(csv_path)
     with open(csv_path, "a", newline="", encoding="utf-8") as fcsv:
@@ -583,7 +578,7 @@ def main():
                 h["fulltext_file"],
             ])
 
-    # Print to stdout so GitHub Actions logs show the summary
+    # Log to stdout for Actions
     print("\n".join(bullet_blocks))
 
 

@@ -299,38 +299,39 @@ def main():
     total_core_form = 0
 
     for f in filings:
-    total_seen += 1
+        total_seen += 1 # <-- FIX 1: Indented
 
-    # ✅ Correct attribute names from edgartools Filing API
-    form = (getattr(f, "form", "") or "").strip()
-    company_name = (getattr(f, "company", "") or "").strip()
+        # ✅ Correct attribute names from edgartools Filing API
+        form = (getattr(f, "form", "") or "").strip()
+        company_name = (getattr(f, "company", "") or "").strip()
 
-    # Safe handling of filing_date, which may be a string or datetime.date
-    _filed = getattr(f, "filing_date", None)
-    if isinstance(_filed, str):
-        filed_at = _filed.strip()
-    elif _filed is None:
-        filed_at = ""
-    else:
-        # datetime.date or datetime.datetime → ISO string
+        # Safe handling of filing_date, which may be a string or datetime.date
+        _filed = getattr(f, "filing_date", None)
+        if isinstance(_filed, str):
+            filed_at = _filed.strip()
+        elif _filed is None:
+            filed_at = ""
+        else:
+            # datetime.date or datetime.datetime → ISO string
+            try:
+                filed_at = _filed.isoformat()
+            except Exception:
+                filed_at = str(_filed)
+
+        url = (getattr(f, "filing_url", None) or getattr(f, "url", "") or "").strip()
+
+        # edgar's Filing object typically doesn't have ticker; leave blank (optional lookup is slower)
+        ticker = ""
+
         try:
-            filed_at = _filed.isoformat()
+            body_text = f.text()
         except Exception:
-            filed_at = str(_filed)
+            body_text = ""
 
-    url = (getattr(f, "filing_url", None) or getattr(f, "url", "") or "").strip()
-
-    # edgar's Filing object typically doesn't have ticker; leave blank (optional lookup is slower)
-    ticker = ""
-
-    try:
-        body_text = f.text()
-    except Exception:
-        body_text = ""
-
+        # FIX 2 & 3: The rest of the loop logic is now correctly indented
         # --- scoring (for ALL filings, even off-form) ---
         direct_pts  = weighted_keyword_score(company_name, DIRECT_KEYWORDS) \
-                    + weighted_keyword_score(body_text, DIRECT_KEYWORDS)
+                      + weighted_keyword_score(body_text, DIRECT_KEYWORDS)
         context_pts = weighted_keyword_score(body_text, CONTEXT_KEYWORDS)
         combo_pts   = pair_score(body_text, PAIR_RULES)
         boost_pts   = 5 if is_core_freight_company(company_name) else 0

@@ -1,0 +1,54 @@
+name: SEC Freight Scan
+
+on:
+  schedule:
+    # Weekdays ~9:00 AM ET (13:00 UTC)
+    - cron: "0 13 * * 1-5"
+    # Weekdays ~5:00 PM ET (21:00 UTC)
+    - cron: "0 21 * * 1-5"
+  workflow_dispatch: {}  # lets you run it manually
+
+jobs:
+  run-sec-scan:
+    runs-on: ubuntu-latest
+
+    env:
+      # Pull from repo/Org secret so SEC has a contact
+      EDGAR_USER_AGENT: ${{ secrets.EDGAR_USER_AGENT }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run SEC scan
+        run: |
+          python secdocuments.py
+
+      - name: Create label for artifact name
+        id: label_step
+        run: |
+          # anything before 17:00 UTC = "am", else "pm"
+          HOUR=$(date -u +"%H")
+          if [ "$HOUR" -lt 17 ]; then
+            echo "label=am" >> $GITHUB_OUTPUT
+          else
+            echo "label=pm" >> $GITHUB_OUTPUT
+          fi
+          echo "datestr=$(date -u +'%Y-%m-%dT%H-%MZ')" >> $GITHUB_OUTPUT
+
+      - name: Upload output as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: freight-pulse-sec-${{ steps.label_step.outputs.datestr }}-${{ steps.label_step.outputs.label }}
+          path: output/
+          if-no-files-found: error

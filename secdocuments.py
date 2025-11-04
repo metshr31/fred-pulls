@@ -299,21 +299,34 @@ def main():
     total_core_form = 0
 
     for f in filings:
-        total_seen += 1
+    total_seen += 1
 
-        # ✅ Correct attribute names from edgartools Filing API
-        form = (getattr(f, "form", "") or "").strip()
-        company_name = (getattr(f, "company", "") or "").strip()
-        filed_at = (getattr(f, "filing_date", "") or "").strip()   # "YYYY-MM-DD"
-        url = (getattr(f, "filing_url", None) or getattr(f, "url", "") or "").strip()
+    # ✅ Correct attribute names from edgartools Filing API
+    form = (getattr(f, "form", "") or "").strip()
+    company_name = (getattr(f, "company", "") or "").strip()
 
-        # edgar's Filing object typically doesn't have ticker; leave blank (optional lookup is slower)
-        ticker = ""
-
+    # Safe handling of filing_date, which may be a string or datetime.date
+    _filed = getattr(f, "filing_date", None)
+    if isinstance(_filed, str):
+        filed_at = _filed.strip()
+    elif _filed is None:
+        filed_at = ""
+    else:
+        # datetime.date or datetime.datetime → ISO string
         try:
-            body_text = f.text()
+            filed_at = _filed.isoformat()
         except Exception:
-            body_text = ""
+            filed_at = str(_filed)
+
+    url = (getattr(f, "filing_url", None) or getattr(f, "url", "") or "").strip()
+
+    # edgar's Filing object typically doesn't have ticker; leave blank (optional lookup is slower)
+    ticker = ""
+
+    try:
+        body_text = f.text()
+    except Exception:
+        body_text = ""
 
         # --- scoring (for ALL filings, even off-form) ---
         direct_pts  = weighted_keyword_score(company_name, DIRECT_KEYWORDS) \

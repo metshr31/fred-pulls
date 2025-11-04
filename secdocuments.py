@@ -1,21 +1,21 @@
 import datetime
-from datetime import timezone, timedelta
+from datetime import timezone
 import os
 import re
 import csv
 import hashlib
 import sys
 
-# IMPORTANT: the import is "edgar", not "edgartools"
+# edgartools installs as "edgar"
 try:
     from edgar import get_current_filings, set_identity
 except Exception as e:
     print("ERROR: Could not import 'edgar'. "
-          "Make sure requirements.txt includes 'edgartools' and it installed successfully.\n"
-          f"Underlying import error: {e}", file=sys.stderr)
+          "Ensure requirements.txt includes 'edgartools' (import name is 'edgar').\n"
+          f"Import error: {e}", file=sys.stderr)
     raise
 
-# Apply identity if provided via environment (works in GitHub Actions and locally)
+# Apply identity from env (works locally and in GitHub Actions)
 identity = os.getenv("EDGAR_IDENTITY") or os.getenv("EDGAR_USER_AGENT")
 if identity:
     try:
@@ -33,172 +33,82 @@ CORE_FORMS = {
     "8-K", "10-Q", "10-K", "S-4",
     # High-value foreign filers
     "6-K", "20-F",
-    # Amended variants are common and often material
+    # Amended variants (often material)
     "8-K/A", "10-Q/A", "10-K/A", "6-K/A", "20-F/A", "S-4/A",
-    # Skeptical capital-market docs we still allow if they truly talk freight
+    # Capital-markets docs allowed if they truly talk freight (kept, but penalized below)
     "424B", "424B1", "424B2", "424B3", "424B4", "424B5",
     "FWP", "S-1", "S-1/A", "S-3", "S-3/A",
-    # Optional: 425 (M&A comms) — can impact networks. We include but penalize.
+    # Optional: 425 (M&A comms) — can matter for networks (penalized below)
     "425",
 }
 
 # Direct freight / logistics / network language
 DIRECT_KEYWORDS = {
-    r"\bintermodal\b": 3,
-    r"\brail\b": 2,
-    r"\brailroad\b": 3,
-    r"\bdrayage\b": 4,
-    r"\bchassis\b": 4,
-    r"\bcontainer(s)?\b": 2,
-    r"\bport(s)?\b": 3,
-    r"\bterminal(s)?\b": 2,
-    r"\btransload(ing)?\b": 3,
-    r"\bwarehouse(s|ing)?\b": 2,
-    r"\bdistribution center\b": 2,
-    r"\blogistics\b": 2,
-    r"\bsupply[- ]chain\b": 2,
-    r"\bfreight\b": 3,
-    r"\blinehaul\b": 3,
-    r"\btrucking\b": 3,
-    r"\btruckload\b": 4,
-    r"\bTL\b": 2,
-    r"\bLTL\b": 4,
-    r"\bless[- ]than[- ]truckload\b": 4,
-    r"\bparcel\b": 3,
-    r"\bair freight\b": 3,
-    r"\bcross[- ]border\b": 3,
-    r"\bMexico\b": 2,
-    r"\bUS[- ]Mexico\b": 3,
-    r"\bnearshor(e|ing)\b": 3,
-    r"\bcorridor(s)?\b": 2,
-    r"\blane(s)?\b": 2,
-    r"\bbackhaul\b": 3,
-    r"\bdwell\b": 3,
-    r"\bvelocity\b": 2,
-    r"\bturn time\b": 2,
-    r"\bchassis pool\b": 4,
-    r"\binterchange\b": 2,
+    r"\bintermodal\b": 3, r"\brail\b": 2, r"\brailroad\b": 3, r"\bdrayage\b": 4,
+    r"\bchassis\b": 4, r"\bcontainer(s)?\b": 2, r"\bport(s)?\b": 3, r"\bterminal(s)?\b": 2,
+    r"\btransload(ing)?\b": 3, r"\bwarehouse(s|ing)?\b": 2, r"\bdistribution center\b": 2,
+    r"\blogistics\b": 2, r"\bsupply[- ]chain\b": 2, r"\bfreight\b": 3, r"\blinehaul\b": 3,
+    r"\btrucking\b": 3, r"\btruckload\b": 4, r"\bTL\b": 2, r"\bLTL\b": 4,
+    r"\bless[- ]than[- ]truckload\b": 4, r"\bparcel\b": 3, r"\bair freight\b": 3,
+    r"\bcross[- ]border\b": 3, r"\bMexico\b": 2, r"\bUS[- ]Mexico\b": 3,
+    r"\bnearshor(e|ing)\b": 3, r"\bcorridor(s)?\b": 2, r"\blane(s)?\b": 2,
+    r"\bbackhaul\b": 3, r"\bdwell\b": 3, r"\bvelocity\b": 2, r"\bturn time\b": 2,
+    r"\bchassis pool\b": 4, r"\binterchange\b": 2,
 }
 
 # Indirect US-economy / sector signals (expanded)
 CONTEXT_KEYWORDS = {
-    # Industrial production / manufacturing cycle
-    r"\bindustrial production\b": 3,
-    r"\bcapacity utilization\b": 2,
-    r"\bPMI\b": 2,
-    r"\bISM\b": 2,
-    r"\bbacklog\b": 2,
-    r"\bnew orders\b": 2,
-    r"\bproduction\b": 2,
-    r"\bfactory\b": 2,
-    r"\bplant\b": 2,
-    r"\bCapEx\b": 2,
-    r"\bcapital project\b": 2,
-    r"\bmaintenance turnaround\b": 2,
+    # Industrial / manufacturing cycle
+    r"\bindustrial production\b": 3, r"\bcapacity utilization\b": 2,
+    r"\bPMI\b": 2, r"\bISM\b": 2, r"\bbacklog\b": 2, r"\bnew orders\b": 2,
+    r"\bproduction\b": 2, r"\bfactory\b": 2, r"\bplant\b": 2,
+    r"\bCapEx\b": 2, r"\bcapital project\b": 2, r"\bmaintenance turnaround\b": 2,
 
-    # Construction / building cycle (flatbed-heavy)
-    r"\bconstruction spending\b": 2,
-    r"\bhousing starts?\b": 2,
-    r"\bbuilding permits?\b": 2,
-    r"\bnonresidential\b": 1,
-    r"\bcement\b": 2,
-    r"\bconcrete\b": 2,
-    r"\basphalt\b": 2,
-    r"\blumber\b": 2,
-    r"\bOSB\b": 2,
-    r"\bgypsum\b": 2,
-    r"\brebar\b": 2,
+    # Construction / building (flatbed-heavy)
+    r"\bconstruction spending\b": 2, r"\bhousing starts?\b": 2,
+    r"\bbuilding permits?\b": 2, r"\bnonresidential\b": 1,
+    r"\bcement\b": 2, r"\bconcrete\b": 2, r"\basphalt\b": 2,
+    r"\blumber\b": 2, r"\bOSB\b": 2, r"\bgypsum\b": 2, r"\brebar\b": 2,
 
     # Metals / industrial inputs
-    r"\bsteel\b": 2,
-    r"\bstructural steel\b": 3,
-    r"\bfabricated metal\b": 2,
-    r"\bcoil steel\b": 3,
-    r"\baluminum\b": 2,
-    r"\bcopper\b": 2,
-    r"\bnickel\b": 2,
-    r"\bzinc\b": 2,
+    r"\bsteel\b": 2, r"\bstructural steel\b": 3, r"\bfabricated metal\b": 2,
+    r"\bcoil steel\b": 3, r"\baluminum\b": 2, r"\bcopper\b": 2, r"\bnickel\b": 2, r"\bzinc\b": 2,
 
-    # Energy / chemicals (rail & tank)
-    r"\boilfield\b": 2,
-    r"\brefinery turnaround\b": 3,
-    r"\bchemical plant\b": 3,
-    r"\bammonia\b": 2,
-    r"\bfertilizer\b": 2,
-    r"\bpolyethylene\b": 3,
-    r"\bpolypropylene\b": 3,
-    r"\bresin prices?\b": 3,
-    r"\bPVC\b": 2,
+    # Energy / chemicals
+    r"\boilfield\b": 2, r"\brefinery turnaround\b": 3, r"\bchemical plant\b": 3,
+    r"\bammonia\b": 2, r"\bfertilizer\b": 2, r"\bpolyethylene\b": 3, r"\bpolypropylene\b": 3,
+    r"\bresin prices?\b": 3, r"\bPVC\b": 2,
 
-    # Retail / inventory cycle / parcel
-    r"\bretail sales?\b": 2,
-    r"\bcomp sales?\b": 2,
-    r"\binventor(y|ies)\b": 2,
-    r"\bstockout(s)?\b": 2,
-    r"\brestock(ing)?\b": 2,
-    r"\bSKU (rationalization|reduction)\b": 2,
-    r"\bfulfillment\b": 2,
-    r"\bDC network\b": 3,
-    r"\bdistribution network\b": 3,
-    r"\bDC consolidation\b": 3,
-    r"\bnetwork optimization\b": 2,
-    r"\bmicro[- ]fulfillment\b": 2,
-    r"\blast[- ]mile\b": 2,
-    r"\be[- ]commerce\b": 2,
-    r"\bcorrugated box\b": 3,
-    r"\bpackaging resin\b": 2,
-    r"\bplastics resin\b": 2,
-    r"\bholiday build\b": 2,
+    # Retail / inventory / parcel
+    r"\bretail sales?\b": 2, r"\bcomp sales?\b": 2, r"\binventor(y|ies)\b": 2,
+    r"\bstockout(s)?\b": 2, r"\brestock(ing)?\b": 2, r"\bSKU (rationalization|reduction)\b": 2,
+    r"\bfulfillment\b": 2, r"\bDC network\b": 3, r"\bdistribution network\b": 3,
+    r"\bDC consolidation\b": 3, r"\bnetwork optimization\b": 2, r"\bmicro[- ]fulfillment\b": 2,
+    r"\blast[- ]mile\b": 2, r"\be[- ]commerce\b": 2, r"\bcorrugated box\b": 3,
+    r"\bpackaging resin\b": 2, r"\bplastics resin\b": 2, r"\bholiday build\b": 2,
 
     # Food chain / reefer
-    r"\bprotein processing\b": 3,
-    r"\bmeatpacking\b": 3,
-    r"\bdairy processing\b": 2,
-    r"\bcold storage\b": 3,
-    r"\btemperature[- ]controlled\b": 3,
-    r"\bperishable\b": 2,
-    r"\bproduce season\b": 2,
-    r"\bharvest\b": 2,
-    r"\bgrain exports?\b": 2,
-    r"\bsoy(beans)?\b": 2,
-    r"\bcorn\b": 2,
-    r"\bwheat\b": 2,
+    r"\bprotein processing\b": 3, r"\bmeatpacking\b": 3, r"\bdairy processing\b": 2,
+    r"\bcold storage\b": 3, r"\btemperature[- ]controlled\b": 3, r"\bperishable\b": 2,
+    r"\bproduce season\b": 2, r"\bharvest\b": 2, r"\bgrain exports?\b": 2,
+    r"\bsoy(beans)?\b": 2, r"\bcorn\b": 2, r"\bwheat\b": 2,
 
     # Transportation cost / service stress
-    r"\bfuel surcharge\b": 4,
-    r"\bdiesel\b": 2,
-    r"\blinehaul cost\b": 3,
-    r"\btransportation cost(s)?\b": 2,
-    r"\bfreight cost(s)?\b": 3,
-    r"\bcarrier rates\b": 2,
-    r"\bcapacity constraint(s)?\b": 3,
-    r"\bdriver shortage\b": 4,
-    r"\blabor disruption\b": 3,
-    r"\bstrike\b": 2,
-    r"\bwork stoppage\b": 3,
-    r"\bshutdown\b": 2,
-    r"\bservice interruption\b": 2,
+    r"\bfuel surcharge\b": 4, r"\bdiesel\b": 2, r"\blinehaul cost\b": 3,
+    r"\btransportation cost(s)?\b": 2, r"\bfreight cost(s)?\b": 3, r"\bcarrier rates\b": 2,
+    r"\bcapacity constraint(s)?\b": 3, r"\bdriver shortage\b": 4,
+    r"\blabor disruption\b": 3, r"\bstrike\b": 2, r"\bwork stoppage\b": 3,
+    r"\bshutdown\b": 2, r"\bservice interruption\b": 2,
 
-    # Ports / corridors (named nodes often imply intermodal/rail/truck flows)
-    r"\bSavannah\b": 3,
-    r"\bCharleston\b": 3,
-    r"\bLA[- ]?Long Beach\b": 3,
-    r"\bPort of Los Angeles\b": 3,
-    r"\bPort of Long Beach\b": 3,
-    r"\bHouston\b": 2,
-    r"\bLaredo\b": 3,
-    r"\bNogales\b": 2,
-    r"\bOtay Mesa\b": 2,
+    # Ports / corridors (named nodes)
+    r"\bSavannah\b": 3, r"\bCharleston\b": 3, r"\bLA[- ]?Long Beach\b": 3,
+    r"\bPort of Los Angeles\b": 3, r"\bPort of Long Beach\b": 3, r"\bHouston\b": 2,
+    r"\bLaredo\b": 3, r"\bNogales\b": 2, r"\bOtay Mesa\b": 2,
 
     # Border / nearshoring / trade
-    r"\btariff(s)?\b": 3,
-    r"\bcustoms\b": 2,
-    r"\bborder\b": 2,
-    r"\brelocation of production\b": 4,
-    r"\bshift(ed|ing)? production\b": 3,
-    r"\bnearshore(d|ing)?\b": 4,
-    r"\bMonterrey\b": 3,
-    r"\bJu[aá]rez\b": 3,
+    r"\btariff(s)?\b": 3, r"\bcustoms\b": 2, r"\bborder\b": 2,
+    r"\brelocation of production\b": 4, r"\bshift(ed|ing)? production\b": 3,
+    r"\bnearshore(d|ing)?\b": 4, r"\bMonterrey\b": 3, r"\bJu[aá]rez\b": 3,
 }
 
 # Paired concepts that say "this is a freight capacity / flow story"
@@ -221,13 +131,15 @@ PAIR_RULES = [
 
 # High-priority companies whose disclosures ALWAYS matter to freight
 CORE_FREIGHT_WATCHLIST = [
-    "Union Pacific","Norfolk Southern","CSX","Canadian Pacific Kansas City","Canadian Pacific Kansas City Limited",
-    "BNSF","J.B. Hunt","J B Hunt","Schneider National","Hub Group","Knight-Swift","Knight Swift","Werner Enterprises",
-    "Old Dominion Freight Line","Saia","XPO","GXO","FedEx","United Parcel Service","UPS","Ryder System","ArcBest",
-    "TFI International","Landstar System","Matson","Kirby Corporation","Kirby Corp","C.H. Robinson","CH Robinson","C H Robinson",
+    "Union Pacific","Norfolk Southern","CSX","Canadian Pacific Kansas City",
+    "Canadian Pacific Kansas City Limited","BNSF","J.B. Hunt","J B Hunt",
+    "Schneider National","Hub Group","Knight-Swift","Knight Swift","Werner Enterprises",
+    "Old Dominion Freight Line","Saia","XPO","GXO","FedEx","United Parcel Service","UPS",
+    "Ryder System","ArcBest","TFI International","Landstar System","Matson",
+    "Kirby Corporation","Kirby Corp","C.H. Robinson","CH Robinson","C H Robinson",
 ]
 
-# Mode "lenses"
+# Mode lenses
 MODE_TAGS = [
     ("Rail / Intermodal", [
         r"\brail\b", r"\brailroad\b", r"\bintermodal\b", r"\bchassis\b",
@@ -240,9 +152,8 @@ MODE_TAGS = [
         r"\bless[- ]than[- ]truckload\b", r"\blinehaul\b",
         r"\bfuel surcharge\b", r"\bdriver shortage\b",
         r"\bdistribution center\b", r"\bDC network\b",
-        r"\bSKU (rationalization|reduction)\b",
-        r"\bcorrugated box\b", r"\brestock(ing)?\b",
-        r"\binventor(y|ies)\b", r"\bholiday build\b"
+        r"\bSKU (rationalization|reduction)\b", r"\bcorrugated box\b",
+        r"\brestock(ing)?\b", r"\binventor(y|ies)\b", r"\bholiday build\b"
     ]),
     ("Reefer / Food Cargo", [
         r"\bcold storage\b", r"\btemperature[- ]controlled\b",
@@ -263,12 +174,12 @@ MODE_TAGS = [
     ]),
 ]
 
-# Thresholds (per your request)
+# Thresholds
 SCORE_THRESHOLD = 2
 FULLTEXT_THRESHOLD = 5
 
 ###############################################################################
-# SCORING HELPERS
+# HELPERS
 ###############################################################################
 
 def weighted_keyword_score(text: str, keyword_dict: dict) -> int:
@@ -306,6 +217,7 @@ def guess_mode_tags(text: str):
         for p in patterns:
             if re.search(p, text, flags=re.IGNORECASE):
                 tags.append(label); break
+    # de-dupe, preserve order
     final = []
     for t in tags:
         if t not in final:
@@ -313,12 +225,14 @@ def guess_mode_tags(text: str):
     return final
 
 def form_signal_adjustment(form_type: str) -> int:
-    # 8-K/6-K: +1; 10-Q/10-K/20-F: 0; S-4 neutral; capital-raise forms & 425: -1
-    if form_type in ("8-K", "6-K", "8-K/A", "6-K/A"): return 1
-    if form_type in ("10-Q", "10-K", "20-F", "10-Q/A", "10-K/A", "20-F/A"): return 0
-    if form_type in ("S-4", "S-4/A"): return 0
+    # 8-K/6-K (+ amended): +1; 10-Q/10-K/20-F (+ amended): 0; S-4: 0; capital-raise & 425: -1
+    if form_type in ("8-K", "6-K", "8-K/A", "6-K/A"):
+        return 1
+    if form_type in ("10-Q", "10-K", "20-F", "10-Q/A", "10-K/A", "20-F/A", "S-4", "S-4/A"):
+        return 0
     if (form_type.startswith("424B")
-        or form_type in ("FWP", "S-1", "S-1/A", "S-3", "S-3/A", "425")): return -1
+        or form_type in ("FWP", "S-1", "S-1/A", "S-3", "S-3/A", "425")):
+        return -1
     return 0
 
 def find_relevant_snippet(text: str, patterns: list[str], window: int = 220) -> str:
@@ -329,8 +243,8 @@ def find_relevant_snippet(text: str, patterns: list[str], window: int = 220) -> 
         if m:
             start = max(m.start() - window//2, 0)
             end = min(m.end() + window//2, len(text))
-            snippet = text[start:end]
-            snippet = re.sub(r"\s+", " ", snippet).strip()
+            snippet = re.sub(r"\s+", " ", text[start:end]).strip()
+            # try to end cleanly at nearest period
             period_pos = snippet.find(". ")
             if period_pos != -1 and period_pos < len(snippet) - 20:
                 snippet = snippet[:period_pos+1]
@@ -347,18 +261,15 @@ def tiny_hash(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:10]
 
 def summarize_for_newsletter(company, ticker, form, filed_at, url, rationale, tags, snippet, fulltext_path_if_any):
-    if isinstance(filed_at, datetime.datetime):
-        ts_str = filed_at.strftime("%Y-%m-%d %H:%M UTC")
-    else:
-        ts_str = str(filed_at)
+    ts_str = str(filed_at) if filed_at else "unknown date"
     tag_str = ", ".join(tags) if tags else "General Freight / Supply Chain Impact"
     lines = []
-    lines.append(f"• {company} ({ticker if ticker else 'no ticker'}) filed a {form} on {ts_str}.")
+    lines.append(f"• {company if company else '(unknown issuer)'} ({ticker if ticker else 'no ticker'}) filed a {form if form else '(unknown form)'} on {ts_str}.")
     lines.append(f"  Why it matters: {rationale}")
     lines.append(f"  Mode lens: {tag_str}")
     if snippet:
         lines.append(f'  Excerpt: "{snippet}"')
-    lines.append(f"  Source: {url}")
+    lines.append(f"  Source: {url if url else '(no link)'}")
     if fulltext_path_if_any:
         lines.append(f"  Full text saved: {fulltext_path_if_any}")
     return "\n".join(lines) + "\n"
@@ -369,16 +280,16 @@ def summarize_for_newsletter(company, ticker, form, filed_at, url, rationale, ta
 
 def main():
     now = datetime.datetime.now(timezone.utc)
-    filings = get_current_filings()  # keep the tight recency window
+    filings = get_current_filings()  # keep tight recency window
 
     hits = []
-    candidates = []          # all filings with scores (for recall floor)
+    candidates = []
     bullet_blocks = []
 
     os.makedirs("output", exist_ok=True)
     os.makedirs("output/full_text", exist_ok=True)
 
-    # snippet patterns
+    # snippet patterns (build once)
     snippet_patterns = list(DIRECT_KEYWORDS.keys()) + list(CONTEXT_KEYWORDS.keys())
     for a, b, _w in PAIR_RULES:
         snippet_patterns.append(a); snippet_patterns.append(b)
@@ -390,11 +301,14 @@ def main():
     for f in filings:
         total_seen += 1
 
-        form = getattr(f, "form_type", "") or ""
-        company_name = getattr(f, "company_name", "") or ""
-        ticker = getattr(f, "ticker", "") or ""
-        filed_at = getattr(f, "filed", "")
-        url = getattr(f, "primary_document_url", "") or ""
+        # ✅ Correct attribute names from edgartools Filing API
+        form = (getattr(f, "form", "") or "").strip()
+        company_name = (getattr(f, "company", "") or "").strip()
+        filed_at = (getattr(f, "filing_date", "") or "").strip()   # "YYYY-MM-DD"
+        url = (getattr(f, "filing_url", None) or getattr(f, "url", "") or "").strip()
+
+        # edgar's Filing object typically doesn't have ticker; leave blank (optional lookup is slower)
+        ticker = ""
 
         try:
             body_text = f.text()
@@ -422,11 +336,11 @@ def main():
 
         cand = {
             "date_run": now.date().isoformat(),
-            "company": company_name.strip(),
-            "ticker": ticker.strip(),
+            "company": company_name,
+            "ticker": ticker,
             "form": form,
             "filed_at": filed_at,
-            "url": url.strip(),
+            "url": url,
             "rationale": rationale,
             "tags": modes,
             "score": score,
@@ -445,7 +359,7 @@ def main():
             if score >= SCORE_THRESHOLD:
                 fulltext_path = None
                 if score >= FULLTEXT_THRESHOLD:
-                    base_pieces = [now.date().isoformat(), form, ticker if ticker else safe_slug(company_name)[:20]]
+                    base_pieces = [now.date().isoformat(), form, safe_slug(company_name)[:20] or "issuer"]
                     base_name = "_".join(safe_slug(p) for p in base_pieces if p) + "_" + tiny_hash(url or company_name or "") + ".txt"
                     fulltext_path = os.path.join("output", "full_text", base_name)
                     with open(fulltext_path, "w", encoding="utf-8") as ffull:
@@ -457,9 +371,8 @@ def main():
                 cand_hit["fulltext_file"] = fulltext_path if fulltext_path else ""
                 hits.append(cand_hit)
 
-    # Sort surfaced hits
+    # Sort surfaced hits (filing_date is already ISO; lexical sort works)
     form_rank = {
-        # rank lower is hotter
         "8-K": 1, "6-K": 1, "8-K/A": 1, "6-K/A": 1,
         "10-Q": 2, "10-K": 2, "20-F": 2, "10-Q/A": 2, "10-K/A": 2, "20-F/A": 2,
         "S-4": 3, "S-4/A": 3,
@@ -467,21 +380,17 @@ def main():
         "FWP": 4, "S-1": 4, "S-1/A": 4, "S-3": 4, "S-3/A": 4, "425": 4,
     }
     def sort_key(item):
-        if isinstance(item["filed_at"], datetime.datetime):
-            filed_str = item["filed_at"].strftime("%Y-%m-%d %H:%M:%S")
-        else:
-            filed_str = str(item["filed_at"])
-        return (-item["score"], form_rank.get(item["form"], 99), filed_str[::-1])
+        filed_str = str(item.get("filed_at", ""))
+        return (-item["score"], form_rank.get(item["form"], 99), filed_str)
     hits.sort(key=sort_key)
 
-    # Build report
-    bullet_blocks = []
+    # Report
     bullet_blocks.append("🔎 SEC Filings With Freight / Supply Chain Impact (recent feed)\n")
 
     if not hits:
         bullet_blocks.append("• No high-signal core forms matched the freight/macro criteria above.\n")
 
-        # === Recall Floor: include Top-5 near-misses from ALL forms ===
+        # === Recall Floor: Top-5 near-misses from ALL forms ===
         generic_pat = re.compile(r"\b(supply|inventory|production|capacity|port|logistics|warehouse|CapEx|construction|PMI|ISM|retail)\b", re.I)
         near = []
         for c in candidates:
@@ -500,7 +409,7 @@ def main():
                 off_form_tag = "" if c["form"] in CORE_FORMS else " (off-form)"
                 bullet_blocks.append(
                     summarize_for_newsletter(
-                        company=c["company"], ticker=c["ticker"], form=c["form"]+off_form_tag,
+                        company=c["company"], ticker=c["ticker"], form=(c["form"] or "(unknown form)") + off_form_tag,
                         filed_at=c["filed_at"], url=c["url"],
                         rationale=f"(near-miss) score={c['score']} [direct={c['direct_pts']} context={c['context_pts']} pairs={c['combo_pts']} form={c['form_adj']} boost={c['boost_pts']}] — {c['rationale']}",
                         tags=c["tags"], snippet=c["snippet"], fulltext_path_if_any=""
@@ -520,13 +429,15 @@ def main():
             )
 
     bullet_blocks.append(
-        f"[internal note: surfaced {len(hits)}; "
-        f"total_seen={total_seen}; total_core_form={total_core_form}; "
+        f"[internal note: surfaced {len(hits)}; total_seen={total_seen}; total_core_form={total_core_form}; "
         f"SCORE_THRESHOLD={SCORE_THRESHOLD}; FULLTEXT_THRESHOLD={FULLTEXT_THRESHOLD}]"
     )
 
+    # Quick debug: forms we actually saw
+    unique_forms = sorted({c["form"] for c in candidates if c["form"]})
+    print(f"[debug] forms_seen={len(unique_forms)} sample={unique_forms[:12]}")
+
     # Write outputs
-    os.makedirs("output", exist_ok=True)
     with open("output/freight_pulse_sec_raw.txt", "w", encoding="utf-8") as ftxt:
         ftxt.write("\n".join(bullet_blocks))
 
@@ -540,21 +451,16 @@ def main():
                 "rationale","mode_tags","snippet","url","fulltext_file",
                 "direct_pts","context_pts","combo_pts","boost_pts","form_adj"
             ])
-
-        # always log surfaced hits if any, else log recall-floor near-misses
-        rows = hits
-        if not rows:
-            rows = near if 'near' in locals() else []
+        # Always log surfaced hits; if none, log recall-floor near-misses
+        rows = hits if hits else (near if 'near' in locals() else [])
         for h in rows:
             writer.writerow([
-                now.date().isoformat(), h["company"], h["ticker"], h["form"],
-                h["filed_at"], h["score"], h["rationale"],
-                "; ".join(h["tags"]), h["snippet"], h["url"],
-                h.get("fulltext_file",""),
+                now.date().isoformat(), h["company"], h["ticker"], h["form"], h["filed_at"], h["score"],
+                h["rationale"], "; ".join(h["tags"]), h["snippet"], h["url"], h.get("fulltext_file",""),
                 h["direct_pts"], h["context_pts"], h["combo_pts"], h["boost_pts"], h["form_adj"]
             ])
 
-    # Print to stdout for Actions logs
+    # Echo to Actions logs
     print("\n".join(bullet_blocks))
 
 if __name__ == "__main__":

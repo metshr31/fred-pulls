@@ -6,7 +6,7 @@ import csv
 import hashlib
 import sys
 
-# edgartools installs as "edgar"
+# edgartools installs as the "edgar" module
 try:
     from edgar import get_current_filings, set_identity
 except Exception as e:
@@ -35,7 +35,7 @@ CORE_FORMS = {
     "6-K", "20-F",
     # Amended variants (often material)
     "8-K/A", "10-Q/A", "10-K/A", "6-K/A", "20-F/A", "S-4/A",
-    # Capital-markets docs allowed if they truly talk freight (kept, but penalized below)
+    # Capital-markets docs allowed if they truly talk freight (kept, but penalized)
     "424B", "424B1", "424B2", "424B3", "424B4", "424B5",
     "FWP", "S-1", "S-1/A", "S-3", "S-3/A",
     # Optional: 425 (M&A comms) — can matter for networks (penalized below)

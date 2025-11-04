@@ -12,8 +12,7 @@ jobs:
   run-sec-scan:
     runs-on: ubuntu-latest
     env:
-      # SEC requires a clear user-agent with contact info
-      EDGAR_USER_AGENT: ${{ secrets.EDGAR_USER_AGENT }}
+      EDGAR_IDENTITY: ${{ secrets.EDGAR_IDENTITY }}
 
     steps:
       - name: Checkout repo
@@ -30,9 +29,7 @@ jobs:
           python -c "import sys; print('PY:', sys.executable, sys.version)"
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          # The package is 'edgartools' but the import is 'edgar'
-          python -c "import edgar, sys; print('EDGAR MODULE:', edgar.__file__)"
-          python -m pip show edgartools
+          python -c "import edgar, os; print('EDGAR MODULE:', edgar.__file__); print('ID set?', bool(os.getenv('EDGAR_IDENTITY')))"
 
       - name: Run SEC scan
         run: |
@@ -52,6 +49,11 @@ jobs:
       - name: Upload output as artifact
         uses: actions/upload-artifact@v4
         with:
+          name: freight-pulse-sec-${{ steps.label_step.outputs.datestr }}-${{ steps.label_step.outputs.label }}
+          path: output/
+          if-no-files-found: error
+          retention-days: 10
+
           name: freight-pulse-sec-${{ steps.label_step.outputs.datestr }}-${{ steps.label_step.outputs.label }}
           path: output/
           if-no-files-found: error

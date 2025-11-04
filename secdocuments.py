@@ -246,10 +246,10 @@ MODE_TAGS = [
 ]
 
 # Threshold for "include in summary bullets"
-SCORE_THRESHOLD = 4
+SCORE_THRESHOLD = 2
 
 # Threshold for "also dump the full filing text to its own file"
-FULLTEXT_THRESHOLD = 7
+FULLTEXT_THRESHOLD = 5
 
 
 ###############################################################################

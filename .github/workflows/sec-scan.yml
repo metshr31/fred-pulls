@@ -2,53 +2,41 @@ name: SEC Freight Scan
 
 on:
   schedule:
-    # Weekdays ~9:00 AM ET (13:00 UTC)
-    - cron: "0 13 * * 1-5"
-    # Weekdays ~5:00 PM ET (21:00 UTC)
-    - cron: "0 21 * * 1-5"
-  workflow_dispatch: {}  # lets you run it manually
+    - cron: "0 13 * * 1-5"   # ~9:00 AM ET weekdays
+    - cron: "0 21 * * 1-5"   # ~5:00 PM ET weekdays
+  workflow_dispatch: {}
 
 jobs:
   run-sec-scan:
     runs-on: ubuntu-latest
-
     env:
-      # Pull from repo/Org secret so SEC has a contact
       EDGAR_USER_AGENT: ${{ secrets.EDGAR_USER_AGENT }}
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11 (cache pip)
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      - name: Install dependencies
+      - name: Install dependencies (same interpreter)
         run: |
+          python -c "import sys; print('PY:', sys.executable, sys.version)"
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
+          python -c "import edgartools, sys; print('EDGARTOOLS:', edgartools.__file__)"
 
-      - name: Run SEC scan
+      - name: Run SEC scan (same interpreter)
         run: |
           python secdocuments.py
-
-      - name: Create label for artifact name
-        id: label_step
-        run: |
-          # anything before 17:00 UTC = "am", else "pm"
-          HOUR=$(date -u +"%H")
-          if [ "$HOUR" -lt 17 ]; then
-            echo "label=am" >> $GITHUB_OUTPUT
-          else
-            echo "label=pm" >> $GITHUB_OUTPUT
-          fi
-          echo "datestr=$(date -u +'%Y-%m-%dT%H-%MZ')" >> $GITHUB_OUTPUT
 
       - name: Upload output as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: freight-pulse-sec-${{ steps.label_step.outputs.datestr }}-${{ steps.label_step.outputs.label }}
+          name: freight-pulse-sec-${{ github.run_id }}
           path: output/
           if-no-files-found: error
+          retention-days: 10

@@ -130,7 +130,6 @@ def click_next(page) -> bool:
     Relies on the <a> tag containing a <span> with the text "Next" and NOT being disabled.
     """
     # XPATH for the visible 'Next' button that is NOT disabled (check for cursor-not-allowed class)
-    # This selector is robust to ensure we don't click the disabled 'Next' arrow on the last page.
     next_link_xpath = "//a[.//span[normalize-space(translate(text(),'NEXT','next'))='next'] and not(contains(@class, 'cursor-not-allowed'))]"
     
     el = page.locator(next_link_xpath)
@@ -221,12 +220,24 @@ def scrape_playwright(target_date_str: str, out_path: str, delay: float = 5.0, m
         browser = pw.chromium.launch(headless=headless, args=["--lang=en-US"])
         context = browser.new_context(locale="en-US", viewport={"width":1280,"height":1600})
         page = context.new_page()
-        page.goto(BASE_URL, wait_until="domcontentloaded")
+        
+        # --- FIX 1: Maximize Navigation Stability Timeout ---
+        page.set_default_navigation_timeout(120000) # Set overall navigation timeout to 120s
+        page.goto(BASE_URL, wait_until="networkidle") 
         time.sleep(delay)
+
+        # --- FIX 2: Attempt to dismiss broad security/overlay banners ---
+        try:
+            # Look for common blocking elements and press escape or click agree
+            page.locator('button:has-text("Continue"), button:has-text("I Agree")').first.click(timeout=5000)
+            page.locator('div[aria-label*="Privacy"]').first.press("Escape", timeout=500)
+            time.sleep(2)
+        except Exception:
+            pass
         
         # New, robust initial wait using the verified selector (increased timeout)
         try:
-            page.wait_for_selector(ARTICLE_LIST_SELECTOR, timeout=60000) # Increased to 60s
+            page.wait_for_selector(ARTICLE_LIST_SELECTOR, timeout=60000) # Wait up to 60s for the container
         except PWTimeout:
              print("Warning: Article list container not visible after 60s. Proceeding with collected links.")
 
@@ -236,10 +247,13 @@ def scrape_playwright(target_date_str: str, out_path: str, delay: float = 5.0, m
             links = get_listing_links(page)
             
             # Re-check for links after scrolling, vital for lazy loading sites
-            if not links:
+            if not links and page_idx == 1:
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                time.sleep(2.0)
+                time.sleep(3.0) # Longer wait on initial scroll retry
                 links = get_listing_links(page)
+            
+            if not links:
+                break
 
             for url in links:
                 art = parse_article(page, url, delay)
@@ -273,16 +287,7 @@ def main():
     ap.add_argument("--no-headless", action="store_true", help="Show the browser")
     args = ap.parse_args()
     
-    # Check for playwright browser dependencies installation before scraping
-    try:
-        import subprocess
-        # Check if browsers are installed
-        # Note: This is commented out for cleaner GitHub Actions logs, 
-        # as the YAML file handles installation.
-        # subprocess.run(["playwright", "install", "--with-deps"], check=True, capture_output=True)
-        pass 
-    except Exception:
-        pass
+    # We remove the manual playwright install check here, as GitHub Actions handles it.
 
     scrape_playwright(args.date, args.out, args.delay, args.max_pages, headless=not args.no_headless)
     print(f"Wrote transcripts to {args.out}")

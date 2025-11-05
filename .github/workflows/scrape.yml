@@ -1,7 +1,7 @@
-name: Scheduled Daily Scrape
+name: Scheduled Transcript Daily Scrape
 
 on:
-  # Run at 2:00 AM Eastern Time daily
+  # Run at 2:00 AM Eastern Time daily (7:00 AM UTC)
   schedule:
     - cron: '0 7 * * *' 
   # Allows manual run from the Actions tab
@@ -10,6 +10,10 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    
+    # FIX: Grant explicit write permission for the bot to push changes
+    permissions:                  
+      contents: write             
     
     steps:
       - name: ⬇️ Checkout code
@@ -22,17 +26,23 @@ jobs:
           
       - name: 📦 Install dependencies
         run: |
-          # Use Playwright's native installation method
+          # Install Python dependencies
           pip install playwright beautifulsoup4 python-dateutil
-          # Install the necessary browsers for Playwright
+          # Install the necessary browsers for Playwright (Chromium is bundled)
           playwright install chromium --with-deps
 
       - name: ⚙️ Run the scraper script
+        id: run-script
         run: |
-          # Use the Playwright script and pass today's date automatically
-          # GitHub runner uses UTC, so running at 7:00 UTC gets yesterday's US-published data.
+          # Determine yesterday's date (since the cron runs early UTC for US data)
           TARGET_DATE=$(date -u --date 'yesterday' +%Y-%m-%d)
+          echo "Scraping transcripts for: $TARGET_DATE"
+          
+          # Use the Playwright script
           python scrape_investing_transcripts_playwright.py --date $TARGET_DATE --out transcripts.txt
+          
+          # Expose the date as an output variable for the commit message
+          echo "date=$TARGET_DATE" >> $GITHUB_OUTPUT 
 
       - name: 📤 Commit and push results
         uses: stefanzweifel/git-auto-commit-action@v5
@@ -40,5 +50,5 @@ jobs:
           commit_message: "🤖 Daily scrape update for ${{ steps.run-script.outputs.date }}"
           # Only commit the output file
           file_pattern: transcripts.txt
-          # Use a GitHub Token that has write access
+          # The GITHUB_TOKEN now has 'write' permission granted above
           token: ${{ secrets.GITHUB_TOKEN }}

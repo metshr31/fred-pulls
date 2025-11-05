@@ -9,7 +9,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 BASE_URL = "https://www.investing.com/news/transcripts"
 SEP = "===FREIGHT PULSE NEWS BREAK==="
 
-# FIXED SELECTOR: This element wraps the list of articles (h1 and ul).
+# This selector is no longer actively awaited, but kept for clarity in the links function.
 ARTICLE_LIST_SELECTOR = 'div[data-test="news-container"]'
 
 # Flexible "Published ..." capture (handles "Nov 4, 2025 09:36AM ET" & "11/04/2025, 09:36 AM")
@@ -33,7 +33,6 @@ def parse_publish(text: str):
         return None, None
     raw = m.group(1).strip().strip(",")
     try:
-        # Note: Playwright's environment will use UTC/GMT, ensuring consistency
         dt = dtparser.parse(raw, fuzzy=True)
         return raw, dt.isoformat()
     except Exception:
@@ -237,13 +236,12 @@ def scrape_playwright(target_date_str: str, out_path: str, delay: float = 5.0, m
         except Exception:
             pass
         
-        # New, robust initial wait using the verified selector (increased timeout)
-        try:
-            page.wait_for_selector(ARTICLE_LIST_SELECTOR, timeout=60000) # Wait up to 60s for the container
-        except PWTimeout:
-             # This is expected if a security check still blocked full loading, but we proceed
-             print("Warning: Article list container not visible after 60s. Proceeding with collected links.")
-
+        # --- FINAL CRITICAL FIX: Replace conditional selector wait with a fixed wait ---
+        # This addresses the persistent 0-byte output by forcing the script 
+        # to wait a reasonable time before attempting to scrape links.
+        time.sleep(15.0) 
+        # print("Final fixed wait completed. Attempting to gather links...")
+        
         page_idx = 0
         while page_idx < max_pages:
             page_idx += 1

@@ -221,12 +221,14 @@ def scrape_playwright(target_date_str: str, out_path: str, delay: float = 5.0, m
         context = browser.new_context(locale="en-US", viewport={"width":1280,"height":1600})
         page = context.new_page()
         
-        # --- FIX 1: Maximize Navigation Stability Timeout ---
+        # --- FIX 1: Maximize Navigation Stability Timeout (Overall) ---
         page.set_default_navigation_timeout(120000) # Set overall navigation timeout to 120s
-        page.goto(BASE_URL, wait_until="networkidle") 
+        
+        # --- FIX 2: Critical change from "networkidle" to "domcontentloaded" to prevent infinite security checks ---
+        page.goto(BASE_URL, wait_until="domcontentloaded") 
         time.sleep(delay)
 
-        # --- FIX 2: Attempt to dismiss broad security/overlay banners ---
+        # --- FIX 3: Attempt to dismiss broad security/overlay banners ---
         try:
             # Look for common blocking elements and press escape or click agree
             page.locator('button:has-text("Continue"), button:has-text("I Agree")').first.click(timeout=5000)
@@ -239,6 +241,7 @@ def scrape_playwright(target_date_str: str, out_path: str, delay: float = 5.0, m
         try:
             page.wait_for_selector(ARTICLE_LIST_SELECTOR, timeout=60000) # Wait up to 60s for the container
         except PWTimeout:
+             # This is expected if a security check still blocked full loading, but we proceed
              print("Warning: Article list container not visible after 60s. Proceeding with collected links.")
 
         page_idx = 0

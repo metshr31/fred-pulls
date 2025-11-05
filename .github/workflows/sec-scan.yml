@@ -2,7 +2,7 @@ name: SEC Freight Scan
 
 on:
   schedule:
-    # Weekdays ~9:00 AM ET (13:00 UTC)
+    # Weekdays ~9:30 AM ET (13:30 UTC)
     - cron: "0 13 * * 1-5"
     # Weekdays ~5:00 PM ET (21:00 UTC)
     - cron: "0 21 * * 1-5"
@@ -45,6 +45,9 @@ jobs:
             echo "label=pm" >> $GITHUB_OUTPUT
           fi
           echo "datestr=$(date -u +'%Y-%m-%dT%H-%MZ')" >> $GITHUB_OUTPUT
+          
+      - name: Zip output folder for attachment
+        run: zip -r sec_scan_output.zip output/
 
       - name: Upload output as artifact
         uses: actions/upload-artifact@v4
@@ -53,3 +56,21 @@ jobs:
           path: output/
           if-no-files-found: error
           retention-days: 10
+
+      - name: Email SEC Scan Report (Yahoo → ari.ashe@spglobal.com)
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.mail.yahoo.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.YAHOO_EMAIL }}
+          password: ${{ secrets.YAHOO_APP_PASSWORD }}
+          from: ${{ secrets.YAHOO_EMAIL }}
+          to: ${{ secrets.TO_EMAIL }}
+          subject: "SEC Scan Report – ${{ github.repository }} – ${{ steps.label_step.outputs.label }} run #${{ github.run_number }}"
+          body: |
+            Attached is the latest zip archive of the SEC Freight Scan documents.
+            Repo: ${{ github.repository }}
+            Run ID: ${{ github.run_id }}
+            Commit: ${{ github.sha }}
+          attachments: sec_scan_output.zip

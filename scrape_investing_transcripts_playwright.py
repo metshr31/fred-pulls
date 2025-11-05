@@ -9,7 +9,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 BASE_URL = "https://www.investing.com/news/transcripts"
 SEP = "===FREIGHT PULSE NEWS BREAK==="
 
-# NEW/VERIFIED SELECTOR: We wait for the main content container to ensure it has loaded.
+# FIXED SELECTOR: This element wraps the list of articles (h1 and ul).
 ARTICLE_LIST_SELECTOR = 'div[data-test="news-container"]'
 
 # Flexible "Published ..." capture (handles "Nov 4, 2025 09:36AM ET" & "11/04/2025, 09:36 AM")
@@ -130,6 +130,7 @@ def click_next(page) -> bool:
     Relies on the <a> tag containing a <span> with the text "Next" and NOT being disabled.
     """
     # XPATH for the visible 'Next' button that is NOT disabled (check for cursor-not-allowed class)
+    # This selector is robust to ensure we don't click the disabled 'Next' arrow on the last page.
     next_link_xpath = "//a[.//span[normalize-space(translate(text(),'NEXT','next'))='next'] and not(contains(@class, 'cursor-not-allowed'))]"
     
     el = page.locator(next_link_xpath)
@@ -139,7 +140,6 @@ def click_next(page) -> bool:
             el.first.click(timeout=5000)
             return True
         except PWTimeout:
-            # If click times out (e.g., due to page transition), assume it was the last page or temporary issue
             pass
     return False
 
@@ -162,7 +162,6 @@ def parse_article(page, url: str, delay: float):
     try:
         page.wait_for_selector('div.news-analysis-v2_content__z0iLP', timeout=10000)
     except PWTimeout:
-        # If it times out, the content might just be plain HTML, proceed anyway
         pass
 
     html = page.content()
@@ -218,18 +217,18 @@ def scrape_playwright(target_date_str: str, out_path: str, delay: float = 5.0, m
     results, got_any_for_target = [], False
 
     with sync_playwright() as pw:
-        # Use chromium or firefox which are generally good in cloud/headless environments
+        # Use chromium which is generally good in cloud/headless environments
         browser = pw.chromium.launch(headless=headless, args=["--lang=en-US"])
         context = browser.new_context(locale="en-US", viewport={"width":1280,"height":1600})
         page = context.new_page()
         page.goto(BASE_URL, wait_until="domcontentloaded")
         time.sleep(delay)
         
-        # New, robust initial wait using the verified selector
+        # New, robust initial wait using the verified selector (increased timeout)
         try:
-            page.wait_for_selector(ARTICLE_LIST_SELECTOR, timeout=30000) # 30s timeout
+            page.wait_for_selector(ARTICLE_LIST_SELECTOR, timeout=60000) # Increased to 60s
         except PWTimeout:
-             print("Warning: Article list container not visible after 30s. Proceeding with collected links.")
+             print("Warning: Article list container not visible after 60s. Proceeding with collected links.")
 
         page_idx = 0
         while page_idx < max_pages:
@@ -278,15 +277,12 @@ def main():
     try:
         import subprocess
         # Check if browsers are installed
-        subprocess.run(["playwright", "install", "--with-deps"], check=True, capture_output=True)
-    except FileNotFoundError:
-        print("Playwright is installed, but the 'playwright' command is not recognized.")
-        print("Please run: playwright install chromium")
-        sys.exit(1)
-    except subprocess.CalledProcessError as e:
-        print(f"Error installing Playwright browsers: {e.stderr.decode()}")
-        print("Please run: playwright install chromium")
-        sys.exit(1)
+        # Note: This is commented out for cleaner GitHub Actions logs, 
+        # as the YAML file handles installation.
+        # subprocess.run(["playwright", "install", "--with-deps"], check=True, capture_output=True)
+        pass 
+    except Exception:
+        pass
 
     scrape_playwright(args.date, args.out, args.delay, args.max_pages, headless=not args.no_headless)
     print(f"Wrote transcripts to {args.out}")

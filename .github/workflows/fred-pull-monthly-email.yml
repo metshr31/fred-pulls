@@ -2,13 +2,16 @@ name: FRED monthly email (20th and 30th)
 
 on:
   schedule:
-    # 20th of every month at 14:00 UTC (≈ 9/10am ET)
+    # 20th of every month at 14:00 UTC (≈ 9am ET during EST; 10am during EDT)
     - cron: "0 14 20 * *"
     # 30th of every month at 14:00 UTC
     - cron: "0 14 30 * *"
     # February has no 30th: also run on Feb 28 at 14:00 UTC
     - cron: "0 14 28 2 *"
-  workflow_dispatch: {}  # keep manual runs for testing
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
 
 jobs:
   run-and-email:
@@ -26,16 +29,37 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          # Keep this only if any script imports openpyxl directly
+          pip install openpyxl
+
+      - name: Verify required secrets are present
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          YAHOO_EMAIL: ${{ secrets.YAHOO_EMAIL }}
+          YAHOO_APP_PASSWORD: ${{ secrets.YAHOO_APP_PASSWORD }}
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
+        run: |
+          set -euo pipefail
+          for v in FRED_API_KEY YAHOO_EMAIL YAHOO_APP_PASSWORD TO_EMAIL; do
+            if [ -z "${!v:-}" ]; then
+              echo "ERROR: missing secret $v"
+              exit 1
+            fi
+          done
+          echo "All required secrets are set."
 
       - name: Run FRED pull
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: |
+          set -euo pipefail
           python pull_fred_series_bulk_split_pivot_adaptive.py
+          test -f fred_series_2019base.xlsx || { echo "ERROR: expected output file not found"; exit 1; }
 
-      - name: Upload Excel artifact (optional but handy)
+      - name: Upload Excel artifact
         uses: actions/upload-artifact@v4
         with:
           name: fred_series_${{ github.run_number }}
@@ -47,8 +71,8 @@ jobs:
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.mail.yahoo.com
-          server_port: 465        # SSL port
-          secure: true            # use SSL (true for 465; false if you switch to 587/TLS)
+          server_port: 465
+          secure: true
           username: ${{ secrets.YAHOO_EMAIL }}
           password: ${{ secrets.YAHOO_APP_PASSWORD }}
           from: ${{ secrets.YAHOO_EMAIL }}
@@ -56,6 +80,7 @@ jobs:
           subject: "FRED export – ${{ github.repository }} – run #${{ github.run_number }}"
           body: |
             Attached is the FRED export.
+
             Repo: ${{ github.repository }}
             Run ID: ${{ github.run_id }}
             Commit: ${{ github.sha }}

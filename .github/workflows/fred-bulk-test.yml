@@ -1,4 +1,4 @@
-name: FRED Bulk Pull (Test with Prather)
+name: FRED Bulk Pull (Test)
 
 on:
   workflow_dispatch:
@@ -24,13 +24,26 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      - name: Install dependencies
+      - name: Install dependencies (requirements.txt)
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          # Minimal deps + Prather (statsmodels pulls scipy)
-          pip install fredapi pandas numpy openpyxl XlsxWriter statsmodels scipy
+          pip install -r requirements.txt
+          # Optional: keep if any script imports openpyxl directly
+          pip install openpyxl
+
+      - name: Verify FRED_API_KEY is present
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FRED_API_KEY:-}" ]; then
+            echo "ERROR: secrets.FRED_API_KEY is not set."
+            exit 1
+          fi
+          echo "FRED_API_KEY is set."
 
       - name: Prepare outputs dir
         run: |
@@ -51,7 +64,7 @@ jobs:
           set -euo pipefail
           test -f pull_fred_series_bulk_split_pivot_adaptive_test.py || { echo "ERROR: test script not found"; exit 1; }
 
-      - name: Run test (Prather)
+      - name: Run test
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           SAVE_PATH: outputs
@@ -67,17 +80,21 @@ jobs:
           python pull_fred_series_bulk_split_pivot_adaptive_test.py
           END_TS=$(date +%s)
           ELAPSED=$(( END_TS - START_TS ))
-          echo "After run, listing possible outputs in repo root:"
-          ls -lah | grep -E 'fred_series_2019base\.xlsx' || true
           echo "Elapsed: ${ELAPSED}s"
 
       - name: Move report into outputs
         run: |
           set -euo pipefail
+          # Current script output
+          if [ -f fred_series_2019base_with_forecasts.xlsx ]; then
+            mv -f fred_series_2019base_with_forecasts.xlsx outputs/
+          fi
+
+          # Backward compatibility
           if [ -f fred_series_2019base.xlsx ]; then
-            echo "Moving fred_series_2019base.xlsx into outputs/"
             mv -f fred_series_2019base.xlsx outputs/
           fi
+
           echo "Contents of outputs/:"
           ls -lah outputs || true
 

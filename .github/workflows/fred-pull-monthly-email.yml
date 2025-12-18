@@ -32,7 +32,7 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # Keep this only if any script imports openpyxl directly
+          # Keep only if any script imports openpyxl directly
           pip install openpyxl
 
       - name: Verify required secrets are present
@@ -57,13 +57,13 @@ jobs:
         run: |
           set -euo pipefail
           python pull_fred_series_bulk_split_pivot_adaptive.py
-          test -f fred_series_2019base.xlsx || { echo "ERROR: expected output file not found"; exit 1; }
+          test -f fred_series_2019base_with_forecasts.xlsx || { echo "ERROR: expected output file not found"; exit 1; }
 
       - name: Upload Excel artifact
         uses: actions/upload-artifact@v4
         with:
           name: fred_series_${{ github.run_number }}
-          path: fred_series_2019base.xlsx
+          path: fred_series_2019base_with_forecasts.xlsx
           if-no-files-found: error
           retention-days: 30
 
@@ -84,4 +84,4 @@ jobs:
             Repo: ${{ github.repository }}
             Run ID: ${{ github.run_id }}
             Commit: ${{ github.sha }}
-          attachments: fred_series_2019base.xlsx
+          attachments: fred_series_2019base_with_forecasts.xlsx

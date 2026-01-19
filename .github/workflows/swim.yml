@@ -20,7 +20,7 @@ jobs:
           username: ${{ secrets.YAHOO_EMAIL }}
           password: ${{ secrets.YAHOO_APP_PASSWORD }}
           from: ${{ secrets.YAHOO_EMAIL }}
-          to: ${{ secrets.TO_EMAIL_2 }}   # <-- NEW SECRET (set this to lutz@safesplash.com)
+          to: ${{ secrets.TO_EMAIL_2 }}
           subject: "Weston swim lessons discount code"
           body: |
             Hey Liz,

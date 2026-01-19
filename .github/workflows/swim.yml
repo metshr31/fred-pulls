@@ -1,0 +1,30 @@
+name: Email Liz — SafeSplash discount code reminder (15th)
+
+on:
+  schedule:
+    # 15th of every month at 14:00 UTC
+    - cron: "0 14 15 * *"
+  workflow_dispatch: {}  # allow manual runs for testing
+
+jobs:
+  email-liz:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Send email (Liz)
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.mail.yahoo.com
+          server_port: 465          # SSL
+          secure: true
+          username: ${{ secrets.YAHOO_EMAIL }}
+          password: ${{ secrets.YAHOO_APP_PASSWORD }}
+          from: ${{ secrets.YAHOO_EMAIL }}
+          to: ${{ secrets.TO_EMAIL_2 }}   # <-- NEW SECRET (set this to lutz@safesplash.com)
+          subject: "Weston swim lessons discount code"
+          body: |
+            Hey Liz,
+
+            Just a reminder if you can enter in our discount code for his swim lessons. Thanks for all your help for Weston!
+
+            Ari Ashe

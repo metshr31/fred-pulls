@@ -1,4 +1,4 @@
-# Freight Pulse + SEC Filings environment
+# Freight Pulse + SEC Filing environments
 
 # --- Core libraries for data handling and Excel ---
 pandas>=2.0

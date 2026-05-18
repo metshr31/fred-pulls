@@ -6,7 +6,7 @@ on:
 jobs:
   run-truck-tonnage-screen:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     env:
       FRED_API_KEY: ${{ secrets.FRED_API_KEY }}

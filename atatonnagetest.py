@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
 """
-ATA Truck Tonnage Predictive Feature Screen
+ATA Truck Tonnage Forecast Model
 Target: TRUCKD11
 
-GitHub-safe, scaled-down first-run version:
+GitHub-safe forecasting version:
 - Reads FRED_API_KEY from GitHub Secrets / environment variable.
-- Caps the first run at 100 priority series to avoid GitHub/FRED timeout.
-- Caps Ridge input at 100 lagged features for first run.
-- Uses TimeSeriesSplit for RidgeCV.
-- Uses explicit FRED API retry/backoff for rate limits.
-- Exports ata_truck_tonnage_feature_screen.xlsx.
+- Pulls a capped, priority set of FRED/G.17 candidate series.
+- Builds full-sample and train-only correlation screens.
+- Builds true forecast targets for TRUCKD11 YoY at horizons 1, 3, 6, and 12 months.
+- Compares naive baselines, Ridge, Lasso, and Elastic Net.
+- Uses train-only feature selection to reduce leakage.
+- Uses TimeSeriesSplit for CV inside the train period.
+- Writes Excel workbook with model comparison, selected features, predictions, latest forecasts, and data tabs.
 
-Install:
-    pip install pandas numpy requests scikit-learn openpyxl
+Run:
+    python atatonnagetest.py --max-series 75 --max-model-features 75
 
-Run locally:
-    set FRED_API_KEY=your_key_here
-    python atatonnagetest.py --max-series 100 --ridge-max-features 100
-
-GitHub Actions:
-    Add FRED_API_KEY as a repository secret.
+Raise breadth later:
+    python atatonnagetest.py --max-series 150 --max-model-features 100
 """
 
 from __future__ import annotations
@@ -28,15 +26,16 @@ import argparse
 import os
 import re
 import time
+import warnings
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import requests
 
 from sklearn.impute import SimpleImputer
-from sklearn.linear_model import RidgeCV
+from sklearn.linear_model import RidgeCV, LassoCV, ElasticNetCV
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
@@ -44,39 +43,33 @@ from sklearn.preprocessing import StandardScaler
 
 
 # =============================================================================
-# FRED API KEY — GitHub-safe
+# API / global settings
 # =============================================================================
 
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 if not FRED_API_KEY:
     raise RuntimeError(
-        "FRED_API_KEY env var not set. "
-        "Define it in GitHub Secrets or your shell."
+        "FRED_API_KEY env var not set. Define it in GitHub Secrets or your shell."
     )
-
-
-# =============================================================================
-# Settings
-# =============================================================================
 
 FRED_BASE = "https://api.stlouisfed.org/fred"
 
 TARGET_SERIES = "TRUCKD11"
-LAGS = [0, 1, 2, 3, 6, 9, 12]
+FORECAST_HORIZONS = [1, 3, 6, 12]
+FEATURE_LAGS = [0, 1, 2, 3, 6, 9, 12]
 
 MIN_CORR_OBS = 36
-MIN_RIDGE_OBS = 72
+MIN_MODEL_OBS = 72
 
-# Conservative first-run settings. Raise these after the workflow succeeds.
-RIDGE_MAX_FEATURES = 75
 MAX_SERIES_FIRST_TEST = 75
+MAX_MODEL_FEATURES = 75
 
-OUTPUT_XLSX = "ata_truck_tonnage_feature_screen.xlsx"
+OUTPUT_XLSX = "ata_truck_tonnage_forecast_model.xlsx"
 OUTPUT_DATA_DIR = Path("fred_download_cache")
 
 REQUEST_SLEEP_SECONDS = 0.50
 REQUEST_RETRIES = 8
-FRED_DOWNLOAD_SLEEP_SECONDS = 1.50
+FRED_DOWNLOAD_SLEEP_SECONDS = 1.25
 
 
 # =============================================================================
@@ -161,17 +154,6 @@ REQUESTED_SERIES = sorted(
 
 
 def priority_series_order() -> list[str]:
-    """
-    Smaller first-pass universe designed to avoid GitHub/FRED timeouts.
-
-    Keeps:
-    - target
-    - broad IP/manufacturing aggregates
-    - all 3-digit manufacturing groups
-    - freight/retail comparison series
-    - key capacity-utilization series
-    - selected freight-sensitive 4-digit subsectors
-    """
     key_4digit = [
         "IPG3112S", "IPG3116S", "IPG3118S",
         "IPG3221S", "IPG3222S",
@@ -200,15 +182,15 @@ def priority_series_order() -> list[str]:
 
     seen = set()
     out = []
-    for series_id in ordered:
-        if series_id not in seen:
-            seen.add(series_id)
-            out.append(series_id)
+    for sid in ordered:
+        if sid not in seen:
+            seen.add(sid)
+            out.append(sid)
     return out
 
 
 # =============================================================================
-# FRED API helpers
+# FRED helpers
 # =============================================================================
 
 def fred_get_json(endpoint: str, **params) -> dict:
@@ -222,12 +204,11 @@ def fred_get_json(endpoint: str, **params) -> dict:
 
             if response.status_code == 429:
                 wait_seconds = min(120, 10 * (attempt + 1))
-                print(f"Rate limited by FRED; waiting {wait_seconds}s before retry.")
+                print(f"Rate limited by FRED; waiting {wait_seconds}s before retry.", flush=True)
                 time.sleep(wait_seconds)
                 continue
 
-            # 400/404 usually means an invalid or unavailable series ID.
-            # Retrying these wastes minutes and causes GitHub timeouts.
+            # Invalid/unavailable FRED IDs should not be retried.
             if response.status_code in (400, 404):
                 response.raise_for_status()
 
@@ -239,7 +220,6 @@ def fred_get_json(endpoint: str, **params) -> dict:
             last_error = exc
             msg = str(exc).lower()
 
-            # Invalid/unavailable series IDs return 400/404. Do not retry them.
             if "400 client error" in msg or "404 client error" in msg:
                 raise
 
@@ -248,7 +228,7 @@ def fred_get_json(endpoint: str, **params) -> dict:
             else:
                 wait_seconds = min(60, 3 * (attempt + 1))
 
-            print(f"FRED request error: {exc}; waiting {wait_seconds}s before retry.")
+            print(f"FRED request error: {exc}; waiting {wait_seconds}s before retry.", flush=True)
             time.sleep(wait_seconds)
 
     raise RuntimeError(
@@ -262,7 +242,7 @@ def get_series_info(series_id: str) -> Optional[dict]:
         rows = data.get("seriess", [])
         return rows[0] if rows else None
     except Exception as exc:
-        print(f"Metadata unavailable for {series_id}; skipping seed. Reason: {exc}")
+        print(f"Metadata unavailable for {series_id}; skipping seed. Reason: {exc}", flush=True)
         return None
 
 
@@ -489,11 +469,11 @@ def end_date_rank(row: pd.Series) -> pd.Timestamp:
 
 
 def build_candidate_inventory(max_series: Optional[int] = MAX_SERIES_FIRST_TEST) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    print("Finding G.17 release ID...")
+    print("Finding G.17 release ID...", flush=True)
     g17_release_id = find_g17_release_id()
-    print(f"G.17 release_id = {g17_release_id}")
+    print(f"G.17 release_id = {g17_release_id}", flush=True)
 
-    print("Downloading G.17 release series inventory...")
+    print("Downloading G.17 release series inventory...", flush=True)
     g17_inventory = get_release_series(g17_release_id)
 
     if "id" not in g17_inventory.columns and "series_id" in g17_inventory.columns:
@@ -591,13 +571,10 @@ def build_candidate_inventory(max_series: Optional[int] = MAX_SERIES_FIRST_TEST)
 
 
 # =============================================================================
-# Data download and transforms
+# Download and transformations
 # =============================================================================
 
 def download_one_series(series_id: str) -> pd.Series:
-    """
-    Download one FRED series with explicit 429/rate-limit backoff.
-    """
     last_error = None
 
     for attempt in range(REQUEST_RETRIES):
@@ -635,6 +612,9 @@ def download_one_series(series_id: str) -> pd.Series:
             last_error = exc
             msg = str(exc).lower()
 
+            if "400 client error" in msg or "404 client error" in msg:
+                raise
+
             if "too many requests" in msg or "rate limit" in msg or "429" in msg:
                 wait_seconds = min(120, 10 * (attempt + 1))
             else:
@@ -642,7 +622,8 @@ def download_one_series(series_id: str) -> pd.Series:
 
             print(
                 f"  Error/rate-limit on {series_id}: {exc}; waiting {wait_seconds}s "
-                f"before retry {attempt + 1}/{REQUEST_RETRIES}"
+                f"before retry {attempt + 1}/{REQUEST_RETRIES}",
+                flush=True,
             )
             time.sleep(wait_seconds)
 
@@ -685,7 +666,10 @@ def download_series_matrix(inventory: pd.DataFrame, cache_dir: Path) -> pd.DataF
     if not all_series:
         raise RuntimeError("No series downloaded.")
 
-    raw = pd.concat(all_series, axis=1).sort_index()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        raw = pd.concat(all_series, axis=1, sort=True).sort_index()
+
     raw.index = pd.to_datetime(raw.index).to_period("M").to_timestamp()
     raw = raw.groupby(raw.index).last().sort_index()
 
@@ -700,48 +684,37 @@ def pct_change_clean(df: pd.DataFrame, periods: int) -> pd.DataFrame:
 
 
 # =============================================================================
-# Correlation screen
+# Screens and feature engineering
 # =============================================================================
 
-def pearson_pair(
-    x: pd.Series,
-    y: pd.Series,
-    min_obs: int = MIN_CORR_OBS,
-) -> Tuple[float, int]:
+def pearson_pair(x: pd.Series, y: pd.Series, min_obs: int = MIN_CORR_OBS) -> Tuple[float, int]:
     paired = pd.concat([x, y], axis=1).dropna()
-    observation_count = len(paired)
+    n = len(paired)
 
-    if observation_count < min_obs:
-        return np.nan, observation_count
+    if n < min_obs:
+        return np.nan, n
 
-    return float(paired.iloc[:, 0].corr(paired.iloc[:, 1])), observation_count
+    return float(paired.iloc[:, 0].corr(paired.iloc[:, 1])), n
 
 
 def keeper_class(abs_corr: float) -> str:
     if pd.isna(abs_corr):
         return "Insufficient data"
-
     if abs_corr >= 0.60:
         return "Strong keeper"
-
     if abs_corr >= 0.45:
         return "Useful keeper"
-
     if abs_corr >= 0.30:
         return "Maybe"
-
     return "Weak"
 
 
-def build_correlation_screen(
+def build_full_correlation_screen(
     raw: pd.DataFrame,
     yoy: pd.DataFrame,
     mom: pd.DataFrame,
     inventory: pd.DataFrame,
 ) -> pd.DataFrame:
-    if TARGET_SERIES not in raw.columns:
-        raise RuntimeError(f"Target {TARGET_SERIES} was not downloaded.")
-
     target_raw = raw[TARGET_SERIES]
     target_yoy = yoy[TARGET_SERIES]
     target_mom = mom[TARGET_SERIES]
@@ -759,17 +732,12 @@ def build_correlation_screen(
         lag_corrs = {}
         lag_counts = {}
 
-        for lag in LAGS:
+        for lag in FEATURE_LAGS:
             corr, count = pearson_pair(target_yoy.shift(-lag), yoy[series_id])
             lag_corrs[lag] = corr
             lag_counts[lag] = count
 
-        valid_lags = {
-            lag: corr
-            for lag, corr in lag_corrs.items()
-            if not pd.isna(corr)
-        }
-
+        valid_lags = {lag: corr for lag, corr in lag_corrs.items() if not pd.isna(corr)}
         if valid_lags:
             best_lag = max(valid_lags, key=lambda lag: abs(valid_lags[lag]))
             best_corr = valid_lags[best_lag]
@@ -782,28 +750,6 @@ def build_correlation_screen(
             observation_count = max(lag_counts.values()) if lag_counts else 0
 
         meta = metadata.loc[series_id] if series_id in metadata.index else pd.Series(dtype=object)
-
-        exclude_2020_2021_mask = ~(
-            (yoy.index >= "2020-01-01")
-            & (yoy.index <= "2021-12-31")
-        )
-
-        best_corr_ex_2020_2021 = np.nan
-        abs_best_corr_ex_2020_2021 = np.nan
-
-        if not pd.isna(best_lag):
-            ex_corr, _ = pearson_pair(
-                target_yoy.shift(-int(best_lag)).loc[exclude_2020_2021_mask],
-                yoy[series_id].loc[exclude_2020_2021_mask],
-            )
-            best_corr_ex_2020_2021 = ex_corr
-            abs_best_corr_ex_2020_2021 = abs(ex_corr) if not pd.isna(ex_corr) else np.nan
-
-        relationship_weakened = (
-            abs_best_corr - abs_best_corr_ex_2020_2021
-            if not pd.isna(abs_best_corr) and not pd.isna(abs_best_corr_ex_2020_2021)
-            else np.nan
-        )
 
         rows.append(
             {
@@ -828,71 +774,18 @@ def build_correlation_screen(
                 "best_yoy_corr": best_corr,
                 "abs_best_yoy_corr": abs_best_corr,
                 "observation_count": observation_count,
-                "best_yoy_corr_ex_2020_2021": best_corr_ex_2020_2021,
-                "abs_best_yoy_corr_ex_2020_2021": abs_best_corr_ex_2020_2021,
-                "relationship_weakened_ex_2020_2021": relationship_weakened,
                 "keeper_class": keeper_class(abs_best_corr),
-                "flag": "",
             }
         )
 
-    output = pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
 
-    if output.empty:
-        return output
-
-    output = output.sort_values(
-        ["abs_best_yoy_corr", "feature"],
-        ascending=[False, True],
-    ).reset_index(drop=True)
-
-    flags = []
-
-    for _, row in output.iterrows():
-        row_flags = []
-
-        if (
-            pd.notna(row["raw_corr"])
-            and pd.notna(row["abs_best_yoy_corr"])
-            and abs(row["raw_corr"]) >= 0.80
-            and row["abs_best_yoy_corr"] < 0.30
-        ):
-            row_flags.append("High raw correlation likely trend-driven")
-
-        if (
-            pd.notna(row["relationship_weakened_ex_2020_2021"])
-            and row["relationship_weakened_ex_2020_2021"] >= 0.15
-        ):
-            row_flags.append("Relationship weakens materially excluding 2020-2021")
-
-        if row["category"] in {"retail_freight_comparison", "capacity_utilization"}:
-            row_flags.append("Use as comparison / context")
-
-        if (
-            pd.notna(row["best_lag"])
-            and int(row["best_lag"]) in {3, 6, 9, 12}
-            and pd.notna(row["abs_best_yoy_corr"])
-            and row["abs_best_yoy_corr"] >= 0.30
-        ):
-            row_flags.append("Potentially useful lagged signal")
-
-        flags.append("; ".join(row_flags))
-
-    output["flag"] = flags
-
-    return output
+    return out.sort_values(["abs_best_yoy_corr", "feature"], ascending=[False, True]).reset_index(drop=True)
 
 
-# =============================================================================
-# Ridge model
-# =============================================================================
-
-def make_lagged_feature_matrix(
-    yoy: pd.DataFrame,
-    candidate_ids: List[str],
-) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
-    target = yoy[TARGET_SERIES].copy()
-
+def make_lagged_feature_matrix(yoy: pd.DataFrame, candidate_ids: list[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
     feature_parts = []
     feature_map_rows = []
 
@@ -900,242 +793,423 @@ def make_lagged_feature_matrix(
         if series_id == TARGET_SERIES or series_id not in yoy.columns:
             continue
 
-        for lag in LAGS:
-            column_name = f"{series_id}__lag{lag}"
-
-            # For target at month t, lag 3 uses feature at t-3.
-            # This is the predictive use of feature[t] leading target[t+3].
-            feature_parts.append(
-                yoy[series_id].shift(lag).rename(column_name)
-            )
-
-            feature_map_rows.append(
-                {
-                    "model_feature": column_name,
-                    "feature": series_id,
-                    "lag": lag,
-                }
-            )
+        for lag in FEATURE_LAGS:
+            model_feature = f"{series_id}__lag{lag}"
+            feature_parts.append(yoy[series_id].shift(lag).rename(model_feature))
+            feature_map_rows.append({"model_feature": model_feature, "feature": series_id, "lag": lag})
 
     x_matrix = pd.concat(feature_parts, axis=1) if feature_parts else pd.DataFrame(index=yoy.index)
     feature_map = pd.DataFrame(feature_map_rows, columns=["model_feature", "feature", "lag"])
+    return x_matrix, feature_map
 
-    return x_matrix, target, feature_map
 
-
-def build_ridge_model(
-    yoy: pd.DataFrame,
-    corr_screen: pd.DataFrame,
-    inventory: pd.DataFrame,
-    max_features: int = RIDGE_MAX_FEATURES,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    candidate_ids = corr_screen["feature"].astype(str).tolist()
-
-    x_all, y, feature_map = make_lagged_feature_matrix(yoy, candidate_ids)
-
-    valid_y = y.dropna()
-    x_all = x_all.loc[valid_y.index]
-    y = valid_y
-
-    pearson_rows = []
-
-    for column in x_all.columns:
-        pearson, obs_count = pearson_pair(y, x_all[column], min_obs=MIN_CORR_OBS)
-
-        pearson_rows.append(
-            (
-                column,
-                pearson,
-                obs_count,
-                abs(pearson) if not pd.isna(pearson) else np.nan,
-            )
-        )
-
-    pearson_df = pd.DataFrame(
-        pearson_rows,
-        columns=["model_feature", "pearson", "obs", "abs_pearson"],
-    )
-
-    pearson_df = pearson_df[pearson_df["obs"] >= MIN_RIDGE_OBS].copy()
-    pearson_df = pearson_df.sort_values("abs_pearson", ascending=False)
-
-    if max_features and len(pearson_df) > max_features:
-        pearson_df = pearson_df.head(max_features).copy()
-
-    selected_columns = pearson_df["model_feature"].tolist()
-
-    if not selected_columns:
-        raise RuntimeError(
-            "No lagged features met MIN_RIDGE_OBS after Pearson pre-screen. "
-            "Correlation screen is still valid; lower MIN_RIDGE_OBS or increase --max-series."
-        )
-
-    if feature_map.empty or "model_feature" not in feature_map.columns:
-        raise RuntimeError(
-            "No model_feature mappings were created. "
-            "This usually means no candidate series survived into the ridge feature matrix."
-        )
-
-    x = x_all[selected_columns].copy()
-
-    row_nonmissing_count = x.notna().sum(axis=1)
-    minimum_row_features = max(3, min(10, int(len(selected_columns) * 0.05)))
-    keep_rows = row_nonmissing_count >= minimum_row_features
-
-    x = x.loc[keep_rows]
-    y = y.loc[keep_rows]
-
-    if len(y) < 60 or x.shape[1] == 0:
-        raise RuntimeError(
-            f"Not enough data for ridge model: rows={len(y)}, cols={x.shape[1]}"
-        )
-
-    split_index = int(len(y) * 0.80)
-
-    x_train = x.iloc[:split_index]
-    x_test = x.iloc[split_index:]
-
-    y_train = y.iloc[:split_index]
-    y_test = y.iloc[split_index:]
-
-    n_splits = min(5, max(2, len(y_train) // 36))
-    ts_cv = TimeSeriesSplit(n_splits=n_splits)
-
-    alphas = np.logspace(-4, 4, 80)
-
-    model = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="median")),
-            ("scaler", StandardScaler()),
-            ("ridge", RidgeCV(alphas=alphas, cv=ts_cv)),
-        ]
-    )
-
-    model.fit(x_train, y_train)
-
-    train_predictions = pd.Series(model.predict(x_train), index=x_train.index, name="predicted")
-    test_predictions = pd.Series(model.predict(x_test), index=x_test.index, name="predicted")
-
-    def rmse(y_true: pd.Series, y_pred: pd.Series) -> float:
-        return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
-
-    metrics = pd.DataFrame(
-        [
-            {
-                "target": TARGET_SERIES,
-                "model": "RidgeCV_TimeSeriesSplit",
-                "n_train": len(y_train),
-                "n_test": len(y_test),
-                "n_features": x.shape[1],
-                "cv_splits": n_splits,
-                "alpha": float(model.named_steps["ridge"].alpha_),
-                "train_r2": r2_score(y_train, train_predictions),
-                "test_r2": r2_score(y_test, test_predictions) if len(y_test) >= 2 else np.nan,
-                "train_mae": mean_absolute_error(y_train, train_predictions),
-                "test_mae": mean_absolute_error(y_test, test_predictions) if len(y_test) >= 1 else np.nan,
-                "train_mse": float(np.mean((y_train - train_predictions) ** 2)),
-                "test_mse": float(np.mean((y_test - test_predictions) ** 2)) if len(y_test) >= 1 else np.nan,
-                "train_rmse": rmse(y_train, train_predictions),
-                "test_rmse": rmse(y_test, test_predictions) if len(y_test) >= 1 else np.nan,
-                "train_start": y_train.index.min(),
-                "train_end": y_train.index.max(),
-                "test_start": y_test.index.min() if len(y_test) else pd.NaT,
-                "test_end": y_test.index.max() if len(y_test) else pd.NaT,
-            }
-        ]
-    )
-
-    imputed_x = model.named_steps["imputer"].transform(x)
-    scaled_x = model.named_steps["scaler"].transform(imputed_x)
-    coefficients = model.named_steps["ridge"].coef_
-
-    contributions = pd.DataFrame(
-        scaled_x * coefficients,
-        index=x.index,
-        columns=x.columns,
-    )
-
-    latest_date = contributions.index.max()
-    latest_contributions = contributions.loc[latest_date]
-
-    metadata = inventory.set_index("id", drop=False)
-
-    # Robust map from selected model columns back to base series and lag.
-    # This avoids KeyError: 'model_feature' if a prior filtering step leaves an empty
-    # or malformed feature_map object.
-    selected_feature_map = pd.DataFrame({"model_feature": list(x.columns)})
-    feature_map = selected_feature_map.merge(feature_map, on="model_feature", how="left")
-    feature_map = feature_map.merge(
-        pearson_df[["model_feature", "pearson", "obs"]],
-        on="model_feature",
-        how="left",
-    )
-
-    if feature_map["feature"].isna().any():
-        missing = feature_map.loc[feature_map["feature"].isna(), "model_feature"].head(10).tolist()
-        raise RuntimeError(f"Ridge feature-map mismatch. Missing mappings for: {missing}")
-
-    coef_by_feature = dict(zip(x.columns, coefficients))
-
+def select_features_train_only(
+    x_train_all: pd.DataFrame,
+    y_train: pd.Series,
+    feature_map: pd.DataFrame,
+    max_features: int,
+) -> Tuple[list[str], pd.DataFrame]:
     rows = []
 
-    for _, row in feature_map.iterrows():
-        model_feature = row["model_feature"]
-        series_id = row["feature"]
-        lag = int(row["lag"])
-
-        coefficient = float(coef_by_feature[model_feature])
-        meta = metadata.loc[series_id] if series_id in metadata.index else pd.Series(dtype=object)
-        last_contribution = float(latest_contributions[model_feature])
-
-        if last_contribution > 0:
-            contribution_sign = "positive"
-        elif last_contribution < 0:
-            contribution_sign = "negative"
-        else:
-            contribution_sign = "zero"
+    for col in x_train_all.columns:
+        corr, n = pearson_pair(y_train, x_train_all[col], min_obs=MIN_CORR_OBS)
+        fm = feature_map.loc[feature_map["model_feature"] == col]
+        if fm.empty:
+            continue
 
         rows.append(
             {
-                "model_feature": model_feature,
-                "feature": series_id,
-                "series_name": meta.get("title", ""),
-                "category": meta.get("category", ""),
-                "naics": meta.get("naics", ""),
-                "lag": lag,
-                "pearson": row["pearson"],
-                "paired_obs": row["obs"],
-                "ridge_coef": coefficient,
-                "mean_abs_contrib": float(contributions[model_feature].abs().mean()),
-                "last_contrib": last_contribution,
-                "sign_of_latest_contribution": contribution_sign,
-                "latest_available_date": latest_date,
+                "model_feature": col,
+                "feature": fm["feature"].iloc[0],
+                "lag": int(fm["lag"].iloc[0]),
+                "train_pearson": corr,
+                "train_abs_pearson": abs(corr) if not pd.isna(corr) else np.nan,
+                "train_obs": n,
             }
         )
 
-    ridge_output = pd.DataFrame(rows)
+    ranked = pd.DataFrame(rows)
+    if ranked.empty:
+        return [], ranked
 
-    ridge_output["abs_coef"] = ridge_output["ridge_coef"].abs()
-    ridge_output["abs_coef_rank"] = ridge_output["abs_coef"].rank(ascending=False, method="dense").astype(int)
+    ranked = ranked[ranked["train_obs"] >= MIN_MODEL_OBS].copy()
+    ranked = ranked.dropna(subset=["train_abs_pearson"])
 
-    ridge_output = ridge_output.sort_values(
-        ["mean_abs_contrib", "abs_coef"],
-        ascending=False,
-    ).reset_index(drop=True)
+    if ranked.empty:
+        return [], ranked
 
-    all_predictions = pd.concat([train_predictions, test_predictions]).sort_index()
+    # Keep only best lag per base series, based on train-period correlation.
+    ranked = ranked.sort_values(["feature", "train_abs_pearson"], ascending=[True, False])
+    best_per_series = ranked.groupby("feature", as_index=False).head(1).copy()
 
-    predictions = pd.DataFrame(
-        {
-            "actual": y,
-            "predicted": all_predictions,
-            "sample": ["train" if idx <= y_train.index.max() else "test" for idx in y.index],
-        }
+    selected = (
+        best_per_series
+        .sort_values("train_abs_pearson", ascending=False)
+        .head(max_features)
+        .reset_index(drop=True)
     )
 
-    metrics.attrs["predictions"] = predictions
+    return selected["model_feature"].tolist(), selected
 
-    return ridge_output, metrics
+
+# =============================================================================
+# Forecast models
+# =============================================================================
+
+def safe_timeseries_cv(n_train: int) -> TimeSeriesSplit:
+    n_splits = min(5, max(2, n_train // 36))
+    if n_train < 80:
+        n_splits = 2
+    return TimeSeriesSplit(n_splits=n_splits)
+
+
+def evaluate_predictions(
+    y_true: pd.Series,
+    y_pred: pd.Series,
+    model_name: str,
+    horizon: int,
+    n_features: int,
+    nonzero_features: int,
+    alpha: Optional[float] = None,
+    l1_ratio: Optional[float] = None,
+) -> dict:
+    aligned = pd.concat([y_true.rename("actual"), y_pred.rename("predicted")], axis=1).dropna()
+
+    if aligned.empty:
+        return {
+            "horizon": horizon,
+            "model": model_name,
+            "n_obs": 0,
+            "n_features": n_features,
+            "nonzero_features": nonzero_features,
+            "alpha": alpha,
+            "l1_ratio": l1_ratio,
+            "r2": np.nan,
+            "mae": np.nan,
+            "mse": np.nan,
+            "rmse": np.nan,
+            "bias": np.nan,
+            "directional_accuracy": np.nan,
+        }
+
+    errors = aligned["predicted"] - aligned["actual"]
+    mse = float(np.mean(errors ** 2))
+
+    direction = np.sign(aligned["actual"]) == np.sign(aligned["predicted"])
+    directional_accuracy = float(direction.mean())
+
+    return {
+        "horizon": horizon,
+        "model": model_name,
+        "n_obs": len(aligned),
+        "n_features": n_features,
+        "nonzero_features": nonzero_features,
+        "alpha": alpha,
+        "l1_ratio": l1_ratio,
+        "r2": r2_score(aligned["actual"], aligned["predicted"]) if len(aligned) >= 2 else np.nan,
+        "mae": mean_absolute_error(aligned["actual"], aligned["predicted"]),
+        "mse": mse,
+        "rmse": float(np.sqrt(mse)),
+        "bias": float(errors.mean()),
+        "directional_accuracy": directional_accuracy,
+    }
+
+
+def fit_linear_model(model_name: str, x_train: pd.DataFrame, y_train: pd.Series):
+    cv = safe_timeseries_cv(len(y_train))
+
+    if model_name == "Ridge":
+        estimator = RidgeCV(alphas=np.logspace(-4, 4, 80), cv=cv)
+    elif model_name == "Lasso":
+        estimator = LassoCV(
+            alphas=np.logspace(-4, 1, 80),
+            cv=cv,
+            max_iter=50000,
+            random_state=42,
+        )
+    elif model_name == "ElasticNet":
+        estimator = ElasticNetCV(
+            l1_ratio=[0.10, 0.25, 0.50, 0.75, 0.90],
+            alphas=np.logspace(-4, 1, 80),
+            cv=cv,
+            max_iter=50000,
+            random_state=42,
+        )
+    else:
+        raise ValueError(f"Unknown model: {model_name}")
+
+    pipe = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+            ("model", estimator),
+        ]
+    )
+
+    pipe.fit(x_train, y_train)
+    return pipe
+
+
+def model_alpha(pipe) -> Optional[float]:
+    model = pipe.named_steps["model"]
+    alpha = getattr(model, "alpha_", None)
+    if alpha is None:
+        return None
+    return float(alpha)
+
+
+def model_l1_ratio(pipe) -> Optional[float]:
+    model = pipe.named_steps["model"]
+    l1_ratio = getattr(model, "l1_ratio_", None)
+    if l1_ratio is None:
+        return None
+    return float(l1_ratio)
+
+
+def model_coefficients(pipe, columns: list[str]) -> pd.Series:
+    model = pipe.named_steps["model"]
+    coefs = getattr(model, "coef_", np.zeros(len(columns)))
+    return pd.Series(coefs, index=columns, name="coefficient")
+
+
+def build_forecast_experiment(
+    yoy: pd.DataFrame,
+    inventory: pd.DataFrame,
+    max_model_features: int,
+) -> dict[str, pd.DataFrame]:
+    candidate_ids = [c for c in yoy.columns if c != TARGET_SERIES]
+    x_all, feature_map = make_lagged_feature_matrix(yoy, candidate_ids)
+
+    target_yoy_now = yoy[TARGET_SERIES]
+
+    model_comparison_rows = []
+    selected_feature_rows = []
+    prediction_rows = []
+    latest_forecast_rows = []
+    train_corr_rows = []
+
+    metadata = inventory.set_index("id", drop=False)
+
+    for horizon in FORECAST_HORIZONS:
+        print(f"Running forecast horizon h={horizon}", flush=True)
+
+        y_future = target_yoy_now.shift(-horizon).rename(f"{TARGET_SERIES}_YOY_h{horizon}")
+
+        supervised = pd.concat([y_future, target_yoy_now.rename("target_yoy_now"), x_all], axis=1)
+        supervised = supervised.dropna(subset=[y_future.name])
+
+        if len(supervised) < 90:
+            print(f"Skipping horizon {horizon}: insufficient rows ({len(supervised)})", flush=True)
+            continue
+
+        split_idx = int(len(supervised) * 0.80)
+        train_idx = supervised.index[:split_idx]
+        test_idx = supervised.index[split_idx:]
+
+        y_train = supervised.loc[train_idx, y_future.name]
+        y_test = supervised.loc[test_idx, y_future.name]
+
+        x_train_all = supervised.loc[train_idx, x_all.columns]
+        x_test_all = supervised.loc[test_idx, x_all.columns]
+
+        selected_cols, selected_train_corr = select_features_train_only(
+            x_train_all=x_train_all,
+            y_train=y_train,
+            feature_map=feature_map,
+            max_features=max_model_features,
+        )
+
+        if selected_train_corr.empty or not selected_cols:
+            print(f"Skipping ML models for horizon {horizon}: no selected features", flush=True)
+            continue
+
+        selected_train_corr["horizon"] = horizon
+        train_corr_rows.extend(selected_train_corr.to_dict("records"))
+
+        x_train = x_train_all[selected_cols]
+        x_test = x_test_all[selected_cols]
+
+        # Baselines known at time t.
+        baseline_last_all = supervised["target_yoy_now"]
+        baseline_3m_all = target_yoy_now.rolling(3).mean().reindex(supervised.index)
+        baseline_12m_all = target_yoy_now.rolling(12).mean().reindex(supervised.index)
+
+        baselines = {
+            "Baseline_LastKnownYoY": baseline_last_all,
+            "Baseline_Rolling3M": baseline_3m_all,
+            "Baseline_Rolling12M": baseline_12m_all,
+        }
+
+        for baseline_name, pred_all in baselines.items():
+            train_pred = pred_all.loc[train_idx]
+            test_pred = pred_all.loc[test_idx]
+
+            train_metrics = evaluate_predictions(
+                y_train, train_pred, baseline_name, horizon, 0, 0
+            )
+            train_metrics["sample"] = "train"
+
+            test_metrics = evaluate_predictions(
+                y_test, test_pred, baseline_name, horizon, 0, 0
+            )
+            test_metrics["sample"] = "test"
+
+            model_comparison_rows.extend([train_metrics, test_metrics])
+
+            for dt, actual, pred in pd.concat(
+                [y_future.rename("actual"), pred_all.rename("predicted")], axis=1
+            ).dropna().iterrows():
+                prediction_rows.append(
+                    {
+                        "date": dt,
+                        "horizon": horizon,
+                        "model": baseline_name,
+                        "actual": actual,
+                        "predicted": pred,
+                        "sample": "train" if dt in train_idx else ("test" if dt in test_idx else "other"),
+                    }
+                )
+
+            latest_idx = supervised.index.max()
+            latest_forecast_rows.append(
+                {
+                    "forecast_origin": latest_idx,
+                    "forecast_target_date": latest_idx + pd.DateOffset(months=horizon),
+                    "horizon": horizon,
+                    "model": baseline_name,
+                    "forecast_truckd11_yoy": pred_all.loc[latest_idx] if latest_idx in pred_all.index else np.nan,
+                    "n_features": 0,
+                    "nonzero_features": 0,
+                    "alpha": None,
+                    "l1_ratio": None,
+                }
+            )
+
+        for model_name in ["Ridge", "Lasso", "ElasticNet"]:
+            try:
+                pipe = fit_linear_model(model_name, x_train, y_train)
+                train_pred = pd.Series(pipe.predict(x_train), index=x_train.index)
+                test_pred = pd.Series(pipe.predict(x_test), index=x_test.index)
+
+                coefs = model_coefficients(pipe, selected_cols)
+                nonzero = int((coefs.abs() > 1e-10).sum())
+
+                alpha = model_alpha(pipe)
+                l1_ratio = model_l1_ratio(pipe)
+
+                train_metrics = evaluate_predictions(
+                    y_train, train_pred, model_name, horizon, len(selected_cols), nonzero, alpha, l1_ratio
+                )
+                train_metrics["sample"] = "train"
+
+                test_metrics = evaluate_predictions(
+                    y_test, test_pred, model_name, horizon, len(selected_cols), nonzero, alpha, l1_ratio
+                )
+                test_metrics["sample"] = "test"
+
+                model_comparison_rows.extend([train_metrics, test_metrics])
+
+                for model_feature, coef in coefs.items():
+                    fm = feature_map.loc[feature_map["model_feature"] == model_feature]
+                    if fm.empty:
+                        continue
+
+                    base_feature = fm["feature"].iloc[0]
+                    lag = int(fm["lag"].iloc[0])
+                    meta = metadata.loc[base_feature] if base_feature in metadata.index else pd.Series(dtype=object)
+
+                    train_corr_row = selected_train_corr.loc[
+                        selected_train_corr["model_feature"] == model_feature
+                    ]
+                    train_pearson = (
+                        train_corr_row["train_pearson"].iloc[0]
+                        if not train_corr_row.empty else np.nan
+                    )
+
+                    selected_feature_rows.append(
+                        {
+                            "horizon": horizon,
+                            "model": model_name,
+                            "model_feature": model_feature,
+                            "feature": base_feature,
+                            "series_name": meta.get("title", ""),
+                            "category": meta.get("category", ""),
+                            "naics": meta.get("naics", ""),
+                            "lag": lag,
+                            "train_pearson": train_pearson,
+                            "coefficient": float(coef),
+                            "abs_coefficient": float(abs(coef)),
+                            "nonzero": bool(abs(coef) > 1e-10),
+                        }
+                    )
+
+                combined_pred = pd.concat([train_pred, test_pred]).sort_index()
+                for dt, pred in combined_pred.items():
+                    prediction_rows.append(
+                        {
+                            "date": dt,
+                            "horizon": horizon,
+                            "model": model_name,
+                            "actual": y_future.loc[dt] if dt in y_future.index else np.nan,
+                            "predicted": pred,
+                            "sample": "train" if dt in train_idx else ("test" if dt in test_idx else "other"),
+                        }
+                    )
+
+                latest_idx = supervised.index.max()
+                latest_x = supervised.loc[[latest_idx], selected_cols]
+                latest_pred = float(pipe.predict(latest_x)[0])
+
+                latest_forecast_rows.append(
+                    {
+                        "forecast_origin": latest_idx,
+                        "forecast_target_date": latest_idx + pd.DateOffset(months=horizon),
+                        "horizon": horizon,
+                        "model": model_name,
+                        "forecast_truckd11_yoy": latest_pred,
+                        "n_features": len(selected_cols),
+                        "nonzero_features": nonzero,
+                        "alpha": alpha,
+                        "l1_ratio": l1_ratio,
+                    }
+                )
+
+            except Exception as exc:
+                print(f"Model failed: horizon={horizon}, model={model_name}, error={exc}", flush=True)
+                model_comparison_rows.append(
+                    {
+                        "horizon": horizon,
+                        "model": model_name,
+                        "sample": "error",
+                        "error": str(exc),
+                    }
+                )
+
+    model_comparison = pd.DataFrame(model_comparison_rows)
+    selected_features = pd.DataFrame(selected_feature_rows)
+    predictions = pd.DataFrame(prediction_rows)
+    latest_forecast = pd.DataFrame(latest_forecast_rows)
+    train_corr = pd.DataFrame(train_corr_rows)
+
+    if not selected_features.empty:
+        selected_features = selected_features.sort_values(
+            ["horizon", "model", "nonzero", "abs_coefficient"],
+            ascending=[True, True, False, False],
+        )
+
+    if not model_comparison.empty:
+        model_comparison = model_comparison.sort_values(["horizon", "sample", "model"])
+
+    if not latest_forecast.empty:
+        latest_forecast = latest_forecast.sort_values(["horizon", "model"])
+
+    return {
+        "model_comparison": model_comparison,
+        "selected_features": selected_features,
+        "predictions": predictions,
+        "latest_forecast": latest_forecast,
+        "train_corr": train_corr,
+    }
 
 
 # =============================================================================
@@ -1149,24 +1223,20 @@ def write_outputs(
     raw: pd.DataFrame,
     yoy: pd.DataFrame,
     mom: pd.DataFrame,
-    corr: pd.DataFrame,
-    ridge: pd.DataFrame,
-    metrics: pd.DataFrame,
+    full_corr: pd.DataFrame,
+    forecast_outputs: dict[str, pd.DataFrame],
 ) -> None:
     readme = pd.DataFrame(
         [
             {"item": "target", "value": TARGET_SERIES},
-            {"item": "max series", "value": "Default 75 for first GitHub test; use --max-series 0 to disable cap."},
-            {"item": "ridge max features", "value": "Default 75 for first GitHub test."},
-            {"item": "lags", "value": ", ".join(map(str, LAGS))},
-            {"item": "raw transform", "value": "Raw index level"},
-            {"item": "YoY transform", "value": "current month / same month one year earlier - 1"},
-            {"item": "MoM transform", "value": "current month / prior month - 1"},
-            {"item": "correlation lag definition", "value": "candidate leads target; yoy_lag3 = corr(TRUCKD11_YOY at t+3, candidate_YOY at t)"},
-            {"item": "ridge leakage rule", "value": "For target at t, candidate lag L uses candidate value at t-L"},
-            {"item": "ridge cross-validation", "value": "RidgeCV uses TimeSeriesSplit, not random or ordinary K-fold CV"},
-            {"item": "ridge metrics", "value": "Ridge Metrics includes MAE, MSE, RMSE and R-squared for train/test split."},
-            {"item": "keeper classes", "value": "Strong >=0.60; Useful 0.45-0.60; Maybe 0.30-0.45; Weak <0.30"},
+            {"item": "forecast horizons", "value": ", ".join(map(str, FORECAST_HORIZONS))},
+            {"item": "feature lags", "value": ", ".join(map(str, FEATURE_LAGS))},
+            {"item": "target definition", "value": "TRUCKD11 YoY shifted forward by forecast horizon h"},
+            {"item": "feature definition", "value": "Candidate YoY values at t, t-1, t-2, t-3, t-6, t-9, t-12"},
+            {"item": "model selection rule", "value": "Train-only Pearson screen; best lag per base series; top max_model_features"},
+            {"item": "models", "value": "Baseline_LastKnownYoY, Baseline_Rolling3M, Baseline_Rolling12M, Ridge, Lasso, ElasticNet"},
+            {"item": "metrics", "value": "R2, MAE, MSE, RMSE, bias, directional accuracy"},
+            {"item": "caution", "value": "This is a statistical forecast test. Validate with out-of-sample metrics before using operationally."},
         ]
     )
 
@@ -1174,19 +1244,19 @@ def write_outputs(
         readme.to_excel(writer, sheet_name="README", index=False)
         primary_inventory.to_excel(writer, sheet_name="Inventory Primary", index=False)
         full_inventory.to_excel(writer, sheet_name="Inventory All", index=False)
-        corr.to_excel(writer, sheet_name="Correlation Screen", index=False)
-        ridge.to_excel(writer, sheet_name="Ridge Output", index=False)
-        metrics.to_excel(writer, sheet_name="Ridge Metrics", index=False)
+        full_corr.to_excel(writer, sheet_name="Correlation Full Sample", index=False)
 
-        predictions = metrics.attrs.get("predictions")
-        if isinstance(predictions, pd.DataFrame):
-            predictions.to_excel(writer, sheet_name="Ridge Predictions")
+        forecast_outputs["train_corr"].to_excel(writer, sheet_name="Correlation Train Only", index=False)
+        forecast_outputs["model_comparison"].to_excel(writer, sheet_name="Model Comparison", index=False)
+        forecast_outputs["selected_features"].to_excel(writer, sheet_name="Selected Features", index=False)
+        forecast_outputs["latest_forecast"].to_excel(writer, sheet_name="Latest Forecast", index=False)
+        forecast_outputs["predictions"].to_excel(writer, sheet_name="Predictions", index=False)
 
         raw.tail(240).to_excel(writer, sheet_name="Raw Last 20Y")
         yoy.tail(240).to_excel(writer, sheet_name="YoY Last 20Y")
         mom.tail(240).to_excel(writer, sheet_name="MoM Last 20Y")
 
-    print(f"\nWrote {output_xlsx}")
+    print(f"\nWrote {output_xlsx}", flush=True)
 
 
 # =============================================================================
@@ -1212,17 +1282,14 @@ def main() -> None:
         "--max-series",
         type=int,
         default=MAX_SERIES_FIRST_TEST,
-        help=(
-            "Maximum primary series to download. "
-            "Use 100 for first GitHub test; raise later. Use 0 to disable cap."
-        ),
+        help="Maximum primary series to download. Use 0 to disable cap.",
     )
 
     parser.add_argument(
-        "--ridge-max-features",
+        "--max-model-features",
         type=int,
-        default=RIDGE_MAX_FEATURES,
-        help="Maximum lagged features to include in ridge model after Pearson pre-screen.",
+        default=MAX_MODEL_FEATURES,
+        help="Maximum selected model features per horizon.",
     )
 
     args = parser.parse_args()
@@ -1232,35 +1299,27 @@ def main() -> None:
 
     primary_inventory, full_inventory = build_candidate_inventory(max_series=max_series)
 
-    print("\nCandidate inventory:")
-    print(primary_inventory["category"].value_counts(dropna=False).to_string())
-    print(f"\nPrimary candidate count: {len(primary_inventory)}")
-    print(f"All candidate/duplicate count: {len(full_inventory)}")
+    print("\nCandidate inventory:", flush=True)
+    print(primary_inventory["category"].value_counts(dropna=False).to_string(), flush=True)
+    print(f"\nPrimary candidate count: {len(primary_inventory)}", flush=True)
+    print(f"All candidate/duplicate count: {len(full_inventory)}", flush=True)
 
     raw = download_series_matrix(primary_inventory, cache_dir)
 
     if TARGET_SERIES not in raw.columns:
         raise RuntimeError(
-            f"{TARGET_SERIES} was not downloaded. "
-            "Check whether the series ID is valid and accessible with your FRED API key."
+            f"{TARGET_SERIES} was not downloaded. Check whether the series ID is valid."
         )
 
     yoy = pct_change_clean(raw, 12)
     mom = pct_change_clean(raw, 1)
 
-    corr = build_correlation_screen(raw, yoy, mom, primary_inventory)
-
-    try:
-        ridge, metrics = build_ridge_model(
-            yoy=yoy,
-            corr_screen=corr,
-            inventory=primary_inventory,
-            max_features=args.ridge_max_features,
-        )
-    except Exception as exc:
-        print(f"WARNING: Ridge model failed: {exc}")
-        ridge = pd.DataFrame([{"error": str(exc)}])
-        metrics = pd.DataFrame([{"error": str(exc)}])
+    full_corr = build_full_correlation_screen(raw, yoy, mom, primary_inventory)
+    forecast_outputs = build_forecast_experiment(
+        yoy=yoy,
+        inventory=primary_inventory,
+        max_model_features=args.max_model_features,
+    )
 
     write_outputs(
         output_xlsx=args.output,
@@ -1269,39 +1328,20 @@ def main() -> None:
         raw=raw,
         yoy=yoy,
         mom=mom,
-        corr=corr,
-        ridge=ridge,
-        metrics=metrics,
+        full_corr=full_corr,
+        forecast_outputs=forecast_outputs,
     )
 
-    print("\nTop 25 correlation screen:")
-    corr_cols = [
-        "feature",
-        "series_name",
-        "category",
-        "best_lag",
-        "best_yoy_corr",
-        "abs_best_yoy_corr",
-        "keeper_class",
-        "flag",
-    ]
-    print(corr[corr_cols].head(25).to_string(index=False))
+    print("\nTop model comparison rows:", flush=True)
+    model_comp = forecast_outputs["model_comparison"]
+    if not model_comp.empty:
+        cols = [c for c in ["horizon", "sample", "model", "r2", "mae", "rmse", "directional_accuracy", "n_features", "nonzero_features"] if c in model_comp.columns]
+        print(model_comp[cols].head(40).to_string(index=False), flush=True)
 
-    if not ridge.empty and "error" not in ridge.columns:
-        print("\nTop 25 ridge contributions:")
-        ridge_cols = [
-            "feature",
-            "series_name",
-            "lag",
-            "pearson",
-            "ridge_coef",
-            "abs_coef_rank",
-            "mean_abs_contrib",
-            "last_contrib",
-            "sign_of_latest_contribution",
-            "latest_available_date",
-        ]
-        print(ridge[ridge_cols].head(25).to_string(index=False))
+    print("\nLatest forecasts:", flush=True)
+    latest = forecast_outputs["latest_forecast"]
+    if not latest.empty:
+        print(latest.to_string(index=False), flush=True)
 
 
 if __name__ == "__main__":

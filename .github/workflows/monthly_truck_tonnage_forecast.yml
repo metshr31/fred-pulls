@@ -1,0 +1,87 @@
+name: Monthly ATA Truck Tonnage Forecast Workbook
+
+on:
+  workflow_dispatch:
+
+  # Runs at 9:00 AM UTC on the 20th and 30th of every month.
+  # Note: GitHub Actions cron uses UTC, not Eastern Time.
+  # 9:00 AM UTC is 4:00 AM ET during standard time and 5:00 AM ET during daylight time.
+  schedule:
+    - cron: "0 9 20,30 * *"
+
+jobs:
+  run-truck-tonnage-forecast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy requests scikit-learn openpyxl
+
+      - name: Restore FRED download cache
+        uses: actions/cache@v4
+        with:
+          path: fred_download_cache
+          key: fred-download-cache-monthly-${{ github.run_id }}
+          restore-keys: |
+            fred-download-cache-monthly-
+            fred-download-cache-forecast-v4-
+            fred-download-cache-forecast-v3-
+            fred-download-cache-forecast-v2-
+            fred-download-cache-forecast-v1-
+            fred-download-cache-v3-
+            fred-download-cache-v2-
+
+      - name: Confirm FRED_API_KEY is present
+        run: |
+          python - <<'PY'
+          import os
+          if not os.environ.get("FRED_API_KEY"):
+              raise RuntimeError("FRED_API_KEY secret is not available to this workflow.")
+          print("FRED_API_KEY is available.")
+          PY
+
+      - name: Confirm forecast script options
+        run: |
+          python truck_tonnage_monthly_forecast.py --help
+
+      - name: Run ATA Truck Tonnage forecast model
+        run: |
+          python truck_tonnage_monthly_forecast.py --max-series 75 --max-model-features 15 --walk-forward-step 3 --min-train-months 120
+
+      - name: Rename workbook with run date
+        run: |
+          RUN_DATE=$(date -u +"%Y-%m-%d")
+          cp ata_truck_tonnage_forecast_model.xlsx "ata_truck_tonnage_forecast_model_${RUN_DATE}.xlsx"
+
+      - name: Upload monthly forecast workbook
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ata-truck-tonnage-forecast-workbook
+          path: |
+            ata_truck_tonnage_forecast_model.xlsx
+            ata_truck_tonnage_forecast_model_*.xlsx
+          if-no-files-found: warn
+
+      - name: Upload FRED cache artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fred-download-cache
+          path: fred_download_cache/
+          if-no-files-found: ignore

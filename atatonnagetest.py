@@ -1,24 +1,3 @@
-#!/usr/bin/env python3
-"""
-ATA Truck Tonnage Predictive Feature Screen
-Target: TRUCKD11 
-
-GitHub-safe version:
-- Reads FRED_API_KEY from GitHub Secrets / environment variable.
-- Does not hard-code the API key.
-
-Install:
-    pip install pandas numpy requests scikit-learn openpyxl fredapi
-
-Run locally:
-    python ata_truck_tonnage_feature_screen.py
-
-GitHub Actions:
-    Add FRED_API_KEY as a repository secret.
-"""
-
-from __future__ import annotations
-
 import argparse
 import os
 import re
@@ -44,7 +23,6 @@ from sklearn.preprocessing import StandardScaler
 # =============================================================================
 
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
-
 if not FRED_API_KEY:
     raise RuntimeError(
         "FRED_API_KEY env var not set. "
@@ -65,13 +43,16 @@ LAGS = [0, 1, 2, 3, 6, 9, 12]
 
 MIN_CORR_OBS = 36
 MIN_RIDGE_OBS = 72
-RIDGE_MAX_FEATURES = 500
+
+# First-test default. Raise to 500 after you confirm the GitHub run works.
+RIDGE_MAX_FEATURES = 150
 
 OUTPUT_XLSX = "ata_truck_tonnage_feature_screen.xlsx"
 OUTPUT_DATA_DIR = Path("fred_download_cache")
 
-REQUEST_SLEEP_SECONDS = 0.10
-REQUEST_RETRIES = 4
+REQUEST_SLEEP_SECONDS = 0.50
+REQUEST_RETRIES = 8
+FRED_DOWNLOAD_SLEEP_SECONDS = 1.25
 
 
 # =============================================================================
@@ -161,15 +142,9 @@ REQUESTED_SERIES = sorted(
 
 def fred_get_json(endpoint: str, **params) -> dict:
     url = f"{FRED_BASE}/{endpoint}"
-
-    params = {
-        **params,
-        "api_key": FRED_API_KEY,
-        "file_type": "json",
-    }
+    params = {**params, "api_key": FRED_API_KEY, "file_type": "json"}
 
     last_error = None
-
     for attempt in range(REQUEST_RETRIES):
         try:
             response = requests.get(url, params=params, timeout=30)
@@ -233,7 +208,6 @@ def get_release_series(release_id: int, limit: int = 1000) -> pd.DataFrame:
 
 def find_g17_release_id() -> int:
     releases = get_releases()
-
     if releases.empty:
         raise RuntimeError("Could not retrieve FRED releases.")
 
@@ -301,9 +275,7 @@ def classify_category(row: pd.Series) -> str:
 
     if naics:
         if naics.startswith(MANUFACTURING_NAICS_PREFIXES):
-            if len(naics) == 3:
-                return "ip_manufacturing_3digit"
-            return "ip_manufacturing_detail"
+            return "ip_manufacturing_3digit" if len(naics) == 3 else "ip_manufacturing_detail"
 
         if naics in {"1133", "5111"}:
             return "ip_manufacturing_adjacent"
@@ -330,10 +302,7 @@ def candidate_filter(row: pd.Series) -> bool:
         return False
 
     if title_lower.startswith("industrial production:"):
-        if naics and (
-            naics.startswith(MANUFACTURING_NAICS_PREFIXES)
-            or naics in {"1133", "5111"}
-        ):
+        if naics and (naics.startswith(MANUFACTURING_NAICS_PREFIXES) or naics in {"1133", "5111"}):
             return True
 
         if title_contains_any(
@@ -440,7 +409,6 @@ def build_candidate_inventory() -> Tuple[pd.DataFrame, pd.DataFrame]:
         g17_inventory = g17_inventory.rename(columns={"series_id": "id"})
 
     known_ids = set(g17_inventory["id"].astype(str)) if not g17_inventory.empty else set()
-
     seed_rows = []
 
     for series_id in REQUESTED_SERIES:
@@ -511,21 +479,68 @@ def build_candidate_inventory() -> Tuple[pd.DataFrame, pd.DataFrame]:
 # =============================================================================
 
 def download_one_series(series_id: str) -> pd.Series:
-    series = fred.get_series(series_id)
+    """
+    Download one FRED series with explicit 429/rate-limit backoff.
 
-    if series is None or len(series) == 0:
-        return pd.Series(dtype=float, name=series_id)
+    Do NOT use fred.get_series() here. fredapi is convenient, but it does not
+    expose enough retry/backoff control for this broad 300-series batch pull.
+    """
+    last_error = None
 
-    series.name = series_id
-    series.index = pd.to_datetime(series.index)
-    series = pd.to_numeric(series, errors="coerce")
-    return series.sort_index()
+    for attempt in range(REQUEST_RETRIES):
+        try:
+            data = fred_get_json("series/observations", series_id=series_id)
+            observations = data.get("observations", [])
+
+            rows = []
+            for obs in observations:
+                value = obs.get("value")
+
+                if value in (None, "", ".", "#N/A"):
+                    numeric_value = np.nan
+                else:
+                    try:
+                        numeric_value = float(value)
+                    except Exception:
+                        numeric_value = np.nan
+
+                rows.append((pd.to_datetime(obs["date"]), numeric_value))
+
+            if not rows:
+                return pd.Series(dtype=float, name=series_id)
+
+            series = pd.Series(
+                data=[value for _, value in rows],
+                index=pd.DatetimeIndex([date for date, _ in rows], name="date"),
+                name=series_id,
+                dtype=float,
+            )
+
+            return series.sort_index()
+
+        except Exception as exc:
+            last_error = exc
+            msg = str(exc).lower()
+
+            if "too many requests" in msg or "rate limit" in msg or "429" in msg:
+                wait_seconds = min(120, 10 * (attempt + 1))
+                print(
+                    f"  Rate limited on {series_id}; waiting {wait_seconds}s "
+                    f"before retry {attempt + 1}/{REQUEST_RETRIES}"
+                )
+                time.sleep(wait_seconds)
+            else:
+                wait_seconds = min(60, 3 * (attempt + 1))
+                print(
+                    f"  Error on {series_id}: {exc}; waiting {wait_seconds}s "
+                    f"before retry {attempt + 1}/{REQUEST_RETRIES}"
+                )
+                time.sleep(wait_seconds)
+
+    raise RuntimeError(f"Failed downloading {series_id} after retries: {last_error}")
 
 
-def download_series_matrix(
-    inventory: pd.DataFrame,
-    cache_dir: Path,
-) -> pd.DataFrame:
+def download_series_matrix(inventory: pd.DataFrame, cache_dir: Path) -> pd.DataFrame:
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     series_ids = inventory["id"].astype(str).tolist()
@@ -556,11 +571,13 @@ def download_series_matrix(
         except Exception as exc:
             print(f"WARNING: failed downloading {series_id}: {exc}")
 
+        # Be polite to FRED. This is what prevents the 291/300 rate-limit failure.
+        time.sleep(FRED_DOWNLOAD_SLEEP_SECONDS)
+
     if not all_series:
         raise RuntimeError("No series downloaded.")
 
     raw = pd.concat(all_series, axis=1).sort_index()
-
     raw.index = pd.to_datetime(raw.index).to_period("M").to_timestamp("MS")
     raw = raw.groupby(raw.index).last().sort_index()
 
@@ -1034,6 +1051,7 @@ def write_outputs(
             {"item": "ridge leakage rule", "value": "For target at t, candidate lag L uses candidate value at t-L"},
             {"item": "ridge cross-validation", "value": "RidgeCV uses TimeSeriesSplit, not random or ordinary K-fold CV"},
             {"item": "keeper classes", "value": "Strong >=0.60; Useful 0.45-0.60; Maybe 0.30-0.45; Weak <0.30"},
+            {"item": "first-test setting", "value": "RIDGE_MAX_FEATURES defaults to 150. Raise to 500 after confirming GitHub Actions succeeds."},
         ]
     )
 

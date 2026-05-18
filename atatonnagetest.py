@@ -918,7 +918,7 @@ def make_lagged_feature_matrix(
             )
 
     x_matrix = pd.concat(feature_parts, axis=1) if feature_parts else pd.DataFrame(index=yoy.index)
-    feature_map = pd.DataFrame(feature_map_rows)
+    feature_map = pd.DataFrame(feature_map_rows, columns=["model_feature", "feature", "lag"])
 
     return x_matrix, target, feature_map
 
@@ -963,6 +963,19 @@ def build_ridge_model(
         pearson_df = pearson_df.head(max_features).copy()
 
     selected_columns = pearson_df["model_feature"].tolist()
+
+    if not selected_columns:
+        raise RuntimeError(
+            "No lagged features met MIN_RIDGE_OBS after Pearson pre-screen. "
+            "Correlation screen is still valid; lower MIN_RIDGE_OBS or increase --max-series."
+        )
+
+    if feature_map.empty or "model_feature" not in feature_map.columns:
+        raise RuntimeError(
+            "No model_feature mappings were created. "
+            "This usually means no candidate series survived into the ridge feature matrix."
+        )
+
     x = x_all[selected_columns].copy()
 
     row_nonmissing_count = x.notna().sum(axis=1)
@@ -1020,6 +1033,8 @@ def build_ridge_model(
                 "test_r2": r2_score(y_test, test_predictions) if len(y_test) >= 2 else np.nan,
                 "train_mae": mean_absolute_error(y_train, train_predictions),
                 "test_mae": mean_absolute_error(y_test, test_predictions) if len(y_test) >= 1 else np.nan,
+                "train_mse": float(np.mean((y_train - train_predictions) ** 2)),
+                "test_mse": float(np.mean((y_test - test_predictions) ** 2)) if len(y_test) >= 1 else np.nan,
                 "train_rmse": rmse(y_train, train_predictions),
                 "test_rmse": rmse(y_test, test_predictions) if len(y_test) >= 1 else np.nan,
                 "train_start": y_train.index.min(),
@@ -1045,12 +1060,22 @@ def build_ridge_model(
 
     metadata = inventory.set_index("id", drop=False)
 
-    feature_map = feature_map.set_index("model_feature").loc[x.columns].reset_index()
+    # Robust map from selected model columns back to base series and lag.
+    # This avoids KeyError: 'model_feature' if a prior filtering step leaves an empty
+    # or malformed feature_map object.
+    selected_feature_map = pd.DataFrame({"model_feature": list(x.columns)})
+    feature_map = selected_feature_map.merge(feature_map, on="model_feature", how="left")
     feature_map = feature_map.merge(
         pearson_df[["model_feature", "pearson", "obs"]],
         on="model_feature",
         how="left",
     )
+
+    if feature_map["feature"].isna().any():
+        missing = feature_map.loc[feature_map["feature"].isna(), "model_feature"].head(10).tolist()
+        raise RuntimeError(f"Ridge feature-map mismatch. Missing mappings for: {missing}")
+
+    coef_by_feature = dict(zip(x.columns, coefficients))
 
     rows = []
 
@@ -1059,7 +1084,7 @@ def build_ridge_model(
         series_id = row["feature"]
         lag = int(row["lag"])
 
-        coefficient = float(coefficients[list(x.columns).index(model_feature)])
+        coefficient = float(coef_by_feature[model_feature])
         meta = metadata.loc[series_id] if series_id in metadata.index else pd.Series(dtype=object)
         last_contribution = float(latest_contributions[model_feature])
 
@@ -1140,6 +1165,7 @@ def write_outputs(
             {"item": "correlation lag definition", "value": "candidate leads target; yoy_lag3 = corr(TRUCKD11_YOY at t+3, candidate_YOY at t)"},
             {"item": "ridge leakage rule", "value": "For target at t, candidate lag L uses candidate value at t-L"},
             {"item": "ridge cross-validation", "value": "RidgeCV uses TimeSeriesSplit, not random or ordinary K-fold CV"},
+            {"item": "ridge metrics", "value": "Ridge Metrics includes MAE, MSE, RMSE and R-squared for train/test split."},
             {"item": "keeper classes", "value": "Strong >=0.60; Useful 0.45-0.60; Maybe 0.30-0.45; Weak <0.30"},
         ]
     )

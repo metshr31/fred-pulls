@@ -3,18 +3,20 @@
 ATA Truck Tonnage Predictive Feature Screen
 Target: TRUCKD11
 
-GitHub-safe version:
+GitHub-safe, scaled-down first-run version:
 - Reads FRED_API_KEY from GitHub Secrets / environment variable.
-- Does not hard-code the API key.
-- Uses a smaller first-test ridge feature cap by default: RIDGE_MAX_FEATURES = 150.
+- Caps the first run at 100 priority series to avoid GitHub/FRED timeout.
+- Caps Ridge input at 100 lagged features for first run.
 - Uses TimeSeriesSplit for RidgeCV.
-- Writes an Excel workbook artifact.
+- Uses explicit FRED API retry/backoff for rate limits.
+- Exports ata_truck_tonnage_feature_screen.xlsx.
 
 Install:
-    pip install pandas numpy requests scikit-learn openpyxl fredapi
+    pip install pandas numpy requests scikit-learn openpyxl
 
 Run locally:
-    python atatonnagetest.py
+    set FRED_API_KEY=your_key_here
+    python atatonnagetest.py --max-series 100 --ridge-max-features 100
 
 GitHub Actions:
     Add FRED_API_KEY as a repository secret.
@@ -32,7 +34,6 @@ from typing import Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import requests
-from fredapi import Fred
 
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import RidgeCV
@@ -53,8 +54,6 @@ if not FRED_API_KEY:
         "Define it in GitHub Secrets or your shell."
     )
 
-fred = Fred(api_key=FRED_API_KEY)
-
 
 # =============================================================================
 # Settings
@@ -68,14 +67,16 @@ LAGS = [0, 1, 2, 3, 6, 9, 12]
 MIN_CORR_OBS = 36
 MIN_RIDGE_OBS = 72
 
-# First-test default. Raise to 500 after you confirm the GitHub run works.
-RIDGE_MAX_FEATURES = 150
+# Conservative first-run settings. Raise these after the workflow succeeds.
+RIDGE_MAX_FEATURES = 75
+MAX_SERIES_FIRST_TEST = 75
 
 OUTPUT_XLSX = "ata_truck_tonnage_feature_screen.xlsx"
 OUTPUT_DATA_DIR = Path("fred_download_cache")
 
-REQUEST_SLEEP_SECONDS = 0.10
-REQUEST_RETRIES = 4
+REQUEST_SLEEP_SECONDS = 0.50
+REQUEST_RETRIES = 8
+FRED_DOWNLOAD_SLEEP_SECONDS = 1.50
 
 
 # =============================================================================
@@ -159,8 +160,55 @@ REQUESTED_SERIES = sorted(
 )
 
 
+def priority_series_order() -> list[str]:
+    """
+    Smaller first-pass universe designed to avoid GitHub/FRED timeouts.
+
+    Keeps:
+    - target
+    - broad IP/manufacturing aggregates
+    - all 3-digit manufacturing groups
+    - freight/retail comparison series
+    - key capacity-utilization series
+    - selected freight-sensitive 4-digit subsectors
+    """
+    key_4digit = [
+        "IPG3112S", "IPG3116S", "IPG3118S",
+        "IPG3221S", "IPG3222S",
+        "IPG3241S",
+        "IPG3251S", "IPG3252S", "IPG3254S",
+        "IPG3261S", "IPG3262S",
+        "IPG3273S",
+        "IPG3311S", "IPG3313S", "IPG3315S",
+        "IPG3323S", "IPG3324S", "IPG3327S",
+        "IPG3331S", "IPG3332S", "IPG3335S", "IPG3339S",
+        "IPG3344S", "IPG3345S",
+        "IPG3353S",
+        "IPG3361S", "IPG3362S", "IPG3363S", "IPG3364S", "IPG3365S",
+        "IPG3371S", "IPG3372S",
+        "IPG3391S",
+    ]
+
+    ordered = (
+        [TARGET_SERIES]
+        + AGGREGATE_SEEDS
+        + IP_3DIGIT
+        + COMPARISON_SERIES
+        + CAPACITY_SEEDS
+        + key_4digit
+    )
+
+    seen = set()
+    out = []
+    for series_id in ordered:
+        if series_id not in seen:
+            seen.add(series_id)
+            out.append(series_id)
+    return out
+
+
 # =============================================================================
-# FRED metadata helpers
+# FRED API helpers
 # =============================================================================
 
 def fred_get_json(endpoint: str, **params) -> dict:
@@ -173,7 +221,9 @@ def fred_get_json(endpoint: str, **params) -> dict:
             response = requests.get(url, params=params, timeout=30)
 
             if response.status_code == 429:
-                time.sleep(3 + attempt * 3)
+                wait_seconds = min(120, 10 * (attempt + 1))
+                print(f"Rate limited by FRED; waiting {wait_seconds}s before retry.")
+                time.sleep(wait_seconds)
                 continue
 
             response.raise_for_status()
@@ -182,7 +232,15 @@ def fred_get_json(endpoint: str, **params) -> dict:
 
         except Exception as exc:
             last_error = exc
-            time.sleep(1 + attempt * 2)
+            msg = str(exc).lower()
+
+            if "too many requests" in msg or "rate limit" in msg or "429" in msg:
+                wait_seconds = min(120, 10 * (attempt + 1))
+            else:
+                wait_seconds = min(60, 3 * (attempt + 1))
+
+            print(f"FRED request error: {exc}; waiting {wait_seconds}s before retry.")
+            time.sleep(wait_seconds)
 
     raise RuntimeError(
         f"FRED API request failed: endpoint={endpoint}, params={params}, error={last_error}"
@@ -194,7 +252,8 @@ def get_series_info(series_id: str) -> Optional[dict]:
         data = fred_get_json("series", series_id=series_id)
         rows = data.get("seriess", [])
         return rows[0] if rows else None
-    except Exception:
+    except Exception as exc:
+        print(f"Metadata unavailable for {series_id}: {exc}")
         return None
 
 
@@ -420,7 +479,7 @@ def end_date_rank(row: pd.Series) -> pd.Timestamp:
     return pd.Timestamp.min
 
 
-def build_candidate_inventory() -> Tuple[pd.DataFrame, pd.DataFrame]:
+def build_candidate_inventory(max_series: Optional[int] = MAX_SERIES_FIRST_TEST) -> Tuple[pd.DataFrame, pd.DataFrame]:
     print("Finding G.17 release ID...")
     g17_release_id = find_g17_release_id()
     print(f"G.17 release_id = {g17_release_id}")
@@ -494,6 +553,31 @@ def build_candidate_inventory() -> Tuple[pd.DataFrame, pd.DataFrame]:
         na_position="last",
     ).reset_index(drop=True)
 
+    if max_series is not None and max_series > 0 and len(primary_inventory) > max_series:
+        priority = priority_series_order()
+        priority_rank = {series_id: rank for rank, series_id in enumerate(priority)}
+
+        primary_inventory["priority_rank"] = (
+            primary_inventory["id"].astype(str).map(priority_rank).fillna(999999).astype(int)
+        )
+
+        primary_inventory = (
+            primary_inventory
+            .sort_values(["priority_rank", "category", "naics", "id"], na_position="last")
+            .head(max_series)
+            .drop(columns=["priority_rank"])
+            .reset_index(drop=True)
+        )
+
+        if TARGET_SERIES not in set(primary_inventory["id"].astype(str)):
+            target_row = full_inventory[full_inventory["id"].astype(str) == TARGET_SERIES]
+            if not target_row.empty:
+                primary_inventory = (
+                    pd.concat([target_row.head(1), primary_inventory], ignore_index=True, sort=False)
+                    .drop_duplicates("id")
+                    .head(max_series)
+                )
+
     return primary_inventory, full_inventory
 
 
@@ -502,15 +586,58 @@ def build_candidate_inventory() -> Tuple[pd.DataFrame, pd.DataFrame]:
 # =============================================================================
 
 def download_one_series(series_id: str) -> pd.Series:
-    series = fred.get_series(series_id)
+    """
+    Download one FRED series with explicit 429/rate-limit backoff.
+    """
+    last_error = None
 
-    if series is None or len(series) == 0:
-        return pd.Series(dtype=float, name=series_id)
+    for attempt in range(REQUEST_RETRIES):
+        try:
+            data = fred_get_json("series/observations", series_id=series_id)
+            observations = data.get("observations", [])
 
-    series.name = series_id
-    series.index = pd.to_datetime(series.index)
-    series = pd.to_numeric(series, errors="coerce")
-    return series.sort_index()
+            rows = []
+            for obs in observations:
+                value = obs.get("value")
+
+                if value in (None, "", ".", "#N/A"):
+                    numeric_value = np.nan
+                else:
+                    try:
+                        numeric_value = float(value)
+                    except Exception:
+                        numeric_value = np.nan
+
+                rows.append((pd.to_datetime(obs["date"]), numeric_value))
+
+            if not rows:
+                return pd.Series(dtype=float, name=series_id)
+
+            series = pd.Series(
+                data=[value for _, value in rows],
+                index=pd.DatetimeIndex([date for date, _ in rows], name="date"),
+                name=series_id,
+                dtype=float,
+            )
+
+            return series.sort_index()
+
+        except Exception as exc:
+            last_error = exc
+            msg = str(exc).lower()
+
+            if "too many requests" in msg or "rate limit" in msg or "429" in msg:
+                wait_seconds = min(120, 10 * (attempt + 1))
+            else:
+                wait_seconds = min(60, 3 * (attempt + 1))
+
+            print(
+                f"  Error/rate-limit on {series_id}: {exc}; waiting {wait_seconds}s "
+                f"before retry {attempt + 1}/{REQUEST_RETRIES}"
+            )
+            time.sleep(wait_seconds)
+
+    raise RuntimeError(f"Failed downloading {series_id} after retries: {last_error}")
 
 
 def download_series_matrix(inventory: pd.DataFrame, cache_dir: Path) -> pd.DataFrame:
@@ -520,7 +647,7 @@ def download_series_matrix(inventory: pd.DataFrame, cache_dir: Path) -> pd.DataF
     all_series = []
 
     for index, series_id in enumerate(series_ids, start=1):
-        print(f"[{index}/{len(series_ids)}] Downloading {series_id}")
+        print(f"[{index}/{len(series_ids)}] Downloading {series_id}", flush=True)
 
         cache_file = cache_dir / f"{series_id}.csv"
 
@@ -542,13 +669,15 @@ def download_series_matrix(inventory: pd.DataFrame, cache_dir: Path) -> pd.DataF
                 all_series.append(series)
 
         except Exception as exc:
-            print(f"WARNING: failed downloading {series_id}: {exc}")
+            print(f"WARNING: failed downloading {series_id}: {exc}", flush=True)
+
+        time.sleep(FRED_DOWNLOAD_SLEEP_SECONDS)
 
     if not all_series:
         raise RuntimeError("No series downloaded.")
 
     raw = pd.concat(all_series, axis=1).sort_index()
-    raw.index = pd.to_datetime(raw.index).to_period("M").to_timestamp("MS")
+    raw.index = pd.to_datetime(raw.index).to_period("M").to_timestamp()
     raw = raw.groupby(raw.index).last().sort_index()
 
     return raw
@@ -622,8 +751,6 @@ def build_correlation_screen(
         lag_counts = {}
 
         for lag in LAGS:
-            # Candidate leads target.
-            # lag 3 means corr(candidate[t], target[t+3]).
             corr, count = pearson_pair(target_yoy.shift(-lag), yoy[series_id])
             lag_corrs[lag] = corr
             lag_counts[lag] = count
@@ -768,7 +895,7 @@ def make_lagged_feature_matrix(
             column_name = f"{series_id}__lag{lag}"
 
             # For target at month t, lag 3 uses feature at t-3.
-            # This is the correct predictive use of a feature that leads target by 3 months.
+            # This is the predictive use of feature[t] leading target[t+3].
             feature_parts.append(
                 yoy[series_id].shift(lag).rename(column_name)
             )
@@ -864,17 +991,8 @@ def build_ridge_model(
 
     model.fit(x_train, y_train)
 
-    train_predictions = pd.Series(
-        model.predict(x_train),
-        index=x_train.index,
-        name="predicted",
-    )
-
-    test_predictions = pd.Series(
-        model.predict(x_test),
-        index=x_test.index,
-        name="predicted",
-    )
+    train_predictions = pd.Series(model.predict(x_train), index=x_train.index, name="predicted")
+    test_predictions = pd.Series(model.predict(x_test), index=x_test.index, name="predicted")
 
     def rmse(y_true: pd.Series, y_pred: pd.Series) -> float:
         return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
@@ -933,9 +1051,7 @@ def build_ridge_model(
         lag = int(row["lag"])
 
         coefficient = float(coefficients[list(x.columns).index(model_feature)])
-
         meta = metadata.loc[series_id] if series_id in metadata.index else pd.Series(dtype=object)
-
         last_contribution = float(latest_contributions[model_feature])
 
         if last_contribution > 0:
@@ -966,11 +1082,7 @@ def build_ridge_model(
     ridge_output = pd.DataFrame(rows)
 
     ridge_output["abs_coef"] = ridge_output["ridge_coef"].abs()
-    ridge_output["abs_coef_rank"] = (
-        ridge_output["abs_coef"]
-        .rank(ascending=False, method="dense")
-        .astype(int)
-    )
+    ridge_output["abs_coef_rank"] = ridge_output["abs_coef"].rank(ascending=False, method="dense").astype(int)
 
     ridge_output = ridge_output.sort_values(
         ["mean_abs_contrib", "abs_coef"],
@@ -983,10 +1095,7 @@ def build_ridge_model(
         {
             "actual": y,
             "predicted": all_predictions,
-            "sample": [
-                "train" if idx <= y_train.index.max() else "test"
-                for idx in y.index
-            ],
+            "sample": ["train" if idx <= y_train.index.max() else "test" for idx in y.index],
         }
     )
 
@@ -1013,6 +1122,8 @@ def write_outputs(
     readme = pd.DataFrame(
         [
             {"item": "target", "value": TARGET_SERIES},
+            {"item": "max series", "value": "Default 75 for first GitHub test; use --max-series 0 to disable cap."},
+            {"item": "ridge max features", "value": "Default 75 for first GitHub test."},
             {"item": "lags", "value": ", ".join(map(str, LAGS))},
             {"item": "raw transform", "value": "Raw index level"},
             {"item": "YoY transform", "value": "current month / same month one year earlier - 1"},
@@ -1021,7 +1132,6 @@ def write_outputs(
             {"item": "ridge leakage rule", "value": "For target at t, candidate lag L uses candidate value at t-L"},
             {"item": "ridge cross-validation", "value": "RidgeCV uses TimeSeriesSplit, not random or ordinary K-fold CV"},
             {"item": "keeper classes", "value": "Strong >=0.60; Useful 0.45-0.60; Maybe 0.30-0.45; Weak <0.30"},
-            {"item": "first-test setting", "value": "RIDGE_MAX_FEATURES defaults to 150. Raise to 500 after confirming GitHub Actions succeeds."},
         ]
     )
 
@@ -1034,7 +1144,6 @@ def write_outputs(
         metrics.to_excel(writer, sheet_name="Ridge Metrics", index=False)
 
         predictions = metrics.attrs.get("predictions")
-
         if isinstance(predictions, pd.DataFrame):
             predictions.to_excel(writer, sheet_name="Ridge Predictions")
 
@@ -1065,6 +1174,16 @@ def main() -> None:
     )
 
     parser.add_argument(
+        "--max-series",
+        type=int,
+        default=MAX_SERIES_FIRST_TEST,
+        help=(
+            "Maximum primary series to download. "
+            "Use 100 for first GitHub test; raise later. Use 0 to disable cap."
+        ),
+    )
+
+    parser.add_argument(
         "--ridge-max-features",
         type=int,
         default=RIDGE_MAX_FEATURES,
@@ -1074,12 +1193,12 @@ def main() -> None:
     args = parser.parse_args()
 
     cache_dir = Path(args.cache_dir)
+    max_series = None if args.max_series == 0 else args.max_series
 
-    primary_inventory, full_inventory = build_candidate_inventory()
+    primary_inventory, full_inventory = build_candidate_inventory(max_series=max_series)
 
     print("\nCandidate inventory:")
     print(primary_inventory["category"].value_counts(dropna=False).to_string())
-
     print(f"\nPrimary candidate count: {len(primary_inventory)}")
     print(f"All candidate/duplicate count: {len(full_inventory)}")
 
@@ -1121,7 +1240,6 @@ def main() -> None:
     )
 
     print("\nTop 25 correlation screen:")
-
     corr_cols = [
         "feature",
         "series_name",
@@ -1132,12 +1250,10 @@ def main() -> None:
         "keeper_class",
         "flag",
     ]
-
     print(corr[corr_cols].head(25).to_string(index=False))
 
     if not ridge.empty and "error" not in ridge.columns:
         print("\nTop 25 ridge contributions:")
-
         ridge_cols = [
             "feature",
             "series_name",
@@ -1150,7 +1266,6 @@ def main() -> None:
             "sign_of_latest_contribution",
             "latest_available_date",
         ]
-
         print(ridge[ridge_cols].head(25).to_string(index=False))
 
 

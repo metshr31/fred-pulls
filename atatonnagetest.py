@@ -3,7 +3,7 @@
 ATA Truck Tonnage Forecast Model
 Target: TRUCKD11
 
-GitHub-safe forecasting version:
+GitHub-safe forecasting version, patched for prediction-row iteration:
 - Reads FRED_API_KEY from GitHub Secrets / environment variable.
 - Pulls a capped, priority set of FRED/G.17 candidate series.
 - Builds full-sample and train-only correlation screens.
@@ -1056,16 +1056,18 @@ def build_forecast_experiment(
 
             model_comparison_rows.extend([train_metrics, test_metrics])
 
-            for dt, actual, pred in pd.concat(
+            baseline_prediction_frame = pd.concat(
                 [y_future.rename("actual"), pred_all.rename("predicted")], axis=1
-            ).dropna().iterrows():
+            ).dropna()
+
+            for dt, row in baseline_prediction_frame.iterrows():
                 prediction_rows.append(
                     {
                         "date": dt,
                         "horizon": horizon,
                         "model": baseline_name,
-                        "actual": actual,
-                        "predicted": pred,
+                        "actual": row["actual"],
+                        "predicted": row["predicted"],
                         "sample": "train" if dt in train_idx else ("test" if dt in test_idx else "other"),
                     }
                 )

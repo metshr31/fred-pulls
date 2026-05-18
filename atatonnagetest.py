@@ -1016,6 +1016,155 @@ def model_coefficients(pipe, columns: list[str]) -> pd.Series:
     return pd.Series(coefs, index=columns, name="coefficient")
 
 
+def build_best_model_summary(model_comparison: pd.DataFrame) -> pd.DataFrame:
+    """
+    Pick best out-of-sample model by horizon and create a practical recommendation.
+
+    Primary ranking: test RMSE, then test MAE, then test R2.
+    We also compare:
+    - best AR model vs best baseline
+    - best ARPlusIndicators vs best AROnly
+    """
+    if model_comparison.empty:
+        return pd.DataFrame()
+
+    test = model_comparison[
+        (model_comparison.get("sample") == "test")
+        & model_comparison.get("rmse").notna()
+    ].copy()
+
+    if test.empty:
+        return pd.DataFrame()
+
+    rows = []
+
+    for horizon, group in test.groupby("horizon"):
+        ranked = group.sort_values(["rmse", "mae", "r2"], ascending=[True, True, False]).copy()
+        best = ranked.iloc[0]
+
+        baseline = group[group["feature_set"] == "Baseline"].sort_values(["rmse", "mae"], ascending=[True, True])
+        ar_only = group[group["feature_set"] == "AROnly"].sort_values(["rmse", "mae"], ascending=[True, True])
+        ar_plus = group[group["feature_set"] == "ARPlusIndicators"].sort_values(["rmse", "mae"], ascending=[True, True])
+        indicators = group[group["feature_set"] == "IndicatorsOnly"].sort_values(["rmse", "mae"], ascending=[True, True])
+
+        best_baseline = baseline.iloc[0] if not baseline.empty else pd.Series(dtype=object)
+        best_ar = ar_only.iloc[0] if not ar_only.empty else pd.Series(dtype=object)
+        best_ar_plus = ar_plus.iloc[0] if not ar_plus.empty else pd.Series(dtype=object)
+        best_indicators = indicators.iloc[0] if not indicators.empty else pd.Series(dtype=object)
+
+        best_rmse = float(best["rmse"])
+        baseline_rmse = float(best_baseline["rmse"]) if not best_baseline.empty else np.nan
+        ar_rmse = float(best_ar["rmse"]) if not best_ar.empty else np.nan
+        ar_plus_rmse = float(best_ar_plus["rmse"]) if not best_ar_plus.empty else np.nan
+
+        improvement_vs_baseline = (
+            (baseline_rmse - best_rmse) / baseline_rmse
+            if pd.notna(baseline_rmse) and baseline_rmse != 0 else np.nan
+        )
+
+        ar_plus_vs_ar = (
+            (ar_rmse - ar_plus_rmse) / ar_rmse
+            if pd.notna(ar_rmse) and pd.notna(ar_plus_rmse) and ar_rmse != 0 else np.nan
+        )
+
+        if pd.notna(improvement_vs_baseline) and improvement_vs_baseline >= 0.10 and best["r2"] > 0:
+            recommendation = "Use"
+        elif pd.notna(improvement_vs_baseline) and improvement_vs_baseline >= 0.03 and best["r2"] > 0:
+            recommendation = "Watch"
+        elif best["r2"] > 0:
+            recommendation = "Experimental"
+        else:
+            recommendation = "Do not use"
+
+        if pd.notna(ar_plus_vs_ar) and ar_plus_vs_ar > 0.03:
+            indicator_value = "Indicators add value vs AROnly"
+        elif pd.notna(ar_plus_vs_ar) and ar_plus_vs_ar > -0.03:
+            indicator_value = "Indicators roughly neutral vs AROnly"
+        else:
+            indicator_value = "Indicators do not add value vs AROnly"
+
+        rows.append(
+            {
+                "horizon": horizon,
+                "best_model": best["model"],
+                "best_feature_set": best["feature_set"],
+                "best_test_r2": best["r2"],
+                "best_test_mae": best["mae"],
+                "best_test_rmse": best["rmse"],
+                "best_directional_accuracy": best["directional_accuracy"],
+                "best_baseline_model": best_baseline.get("model", np.nan),
+                "best_baseline_rmse": best_baseline.get("rmse", np.nan),
+                "best_aronly_model": best_ar.get("model", np.nan),
+                "best_aronly_rmse": best_ar.get("rmse", np.nan),
+                "best_arplus_model": best_ar_plus.get("model", np.nan),
+                "best_arplus_rmse": best_ar_plus.get("rmse", np.nan),
+                "best_indicators_model": best_indicators.get("model", np.nan),
+                "best_indicators_rmse": best_indicators.get("rmse", np.nan),
+                "rmse_improvement_vs_best_baseline": improvement_vs_baseline,
+                "arplus_rmse_improvement_vs_aronly": ar_plus_vs_ar,
+                "indicator_incremental_value": indicator_value,
+                "recommendation": recommendation,
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values("horizon").reset_index(drop=True)
+
+
+def build_incremental_value_test(model_comparison: pd.DataFrame) -> pd.DataFrame:
+    """
+    Horizon-by-horizon comparison of ARPlusIndicators vs AROnly and IndicatorsOnly.
+    """
+    if model_comparison.empty:
+        return pd.DataFrame()
+
+    test = model_comparison[
+        (model_comparison.get("sample") == "test")
+        & model_comparison.get("rmse").notna()
+    ].copy()
+
+    rows = []
+
+    for horizon, group in test.groupby("horizon"):
+        def best_for(feature_set: str) -> pd.Series:
+            subset = group[group["feature_set"] == feature_set]
+            if subset.empty:
+                return pd.Series(dtype=object)
+            return subset.sort_values(["rmse", "mae", "r2"], ascending=[True, True, False]).iloc[0]
+
+        baseline = best_for("Baseline")
+        ar = best_for("AROnly")
+        arplus = best_for("ARPlusIndicators")
+        ind = best_for("IndicatorsOnly")
+
+        def improvement(a, b):
+            # Positive means a is better than b using RMSE.
+            if a.empty or b.empty:
+                return np.nan
+            if pd.isna(a.get("rmse")) or pd.isna(b.get("rmse")) or b.get("rmse") == 0:
+                return np.nan
+            return (b.get("rmse") - a.get("rmse")) / b.get("rmse")
+
+        rows.append(
+            {
+                "horizon": horizon,
+                "best_baseline": baseline.get("model", np.nan),
+                "best_baseline_rmse": baseline.get("rmse", np.nan),
+                "best_aronly": ar.get("model", np.nan),
+                "best_aronly_rmse": ar.get("rmse", np.nan),
+                "best_arplus": arplus.get("model", np.nan),
+                "best_arplus_rmse": arplus.get("rmse", np.nan),
+                "best_indicators": ind.get("model", np.nan),
+                "best_indicators_rmse": ind.get("rmse", np.nan),
+                "aronly_improvement_vs_baseline": improvement(ar, baseline),
+                "arplus_improvement_vs_baseline": improvement(arplus, baseline),
+                "arplus_improvement_vs_aronly": improvement(arplus, ar),
+                "indicators_improvement_vs_baseline": improvement(ind, baseline),
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values("horizon").reset_index(drop=True)
+
+
 def build_forecast_experiment(
     yoy: pd.DataFrame,
     mom: pd.DataFrame,
@@ -1023,15 +1172,17 @@ def build_forecast_experiment(
     max_model_features: int,
 ) -> dict[str, pd.DataFrame]:
     """
-    Forecast experiment with four kinds of model evidence:
+    Forecast experiment with aligned latest forecasts.
 
-    1. Baselines: target persistence / rolling averages.
-    2. IndicatorsOnly: outside industrial, capacity, retail/freight indicators.
-    3. AROnly: TRUCKD11's own YoY/MoM lags and rolling averages.
-    4. ARPlusIndicators: TRUCKD11 momentum plus selected outside indicators.
+    Model families:
+    1. Baselines
+    2. IndicatorsOnly
+    3. AROnly
+    4. ARPlusIndicators
 
-    This tells us whether industrial indicators add incremental value beyond
-    the target's own momentum.
+    Latest forecasts now include:
+    - common_origin: latest month where TRUCKD11 is known, so all model families are comparable
+    - feature_origin: latest month where selected model features exist, useful for nowcasting when indicators publish faster
     """
     candidate_ids = [c for c in yoy.columns if c != TARGET_SERIES]
 
@@ -1051,6 +1202,7 @@ def build_forecast_experiment(
     }
 
     target_yoy_now = yoy[TARGET_SERIES]
+    common_origin = target_yoy_now.dropna().index.max()
 
     model_comparison_rows = []
     selected_feature_rows = []
@@ -1065,7 +1217,6 @@ def build_forecast_experiment(
 
         y_future = target_yoy_now.shift(-horizon).rename(f"{TARGET_SERIES}_YOY_h{horizon}")
 
-        # Baselines are known at time t and forecast t+h.
         baseline_frame = pd.concat(
             [
                 y_future,
@@ -1092,8 +1243,6 @@ def build_forecast_experiment(
             "Baseline_Rolling3M": baseline_frame["target_yoy_roll3"],
             "Baseline_Rolling12M": baseline_frame["target_yoy_roll12"],
         }
-
-        latest_origin = target_yoy_now.dropna().index.max()
 
         for baseline_name, pred_all in baselines.items():
             train_pred = pred_all.loc[train_idx]
@@ -1130,18 +1279,19 @@ def build_forecast_experiment(
                     }
                 )
 
-            if latest_origin is not None and latest_origin in target_yoy_now.index:
+            if common_origin is not None:
                 if baseline_name == "Baseline_LastKnownYoY":
-                    latest_pred = target_yoy_now.loc[latest_origin]
+                    latest_pred = target_yoy_now.loc[common_origin]
                 elif baseline_name == "Baseline_Rolling3M":
-                    latest_pred = target_yoy_now.rolling(3).mean().loc[latest_origin]
+                    latest_pred = target_yoy_now.rolling(3).mean().loc[common_origin]
                 else:
-                    latest_pred = target_yoy_now.rolling(12).mean().loc[latest_origin]
+                    latest_pred = target_yoy_now.rolling(12).mean().loc[common_origin]
 
                 latest_forecast_rows.append(
                     {
-                        "forecast_origin": latest_origin,
-                        "forecast_target_date": latest_origin + pd.DateOffset(months=horizon),
+                        "forecast_origin_type": "common_origin",
+                        "forecast_origin": common_origin,
+                        "forecast_target_date": common_origin + pd.DateOffset(months=horizon),
                         "horizon": horizon,
                         "model": baseline_name,
                         "feature_set": "Baseline",
@@ -1170,7 +1320,6 @@ def build_forecast_experiment(
             x_train_all = supervised.loc[train_idx, x_source.columns]
             x_test_all = supervised.loc[test_idx, x_source.columns]
 
-            # Keep AR-only feature count modest but not over-restrictive.
             feature_cap = min(max_model_features, 20) if feature_set_name == "AROnly" else max_model_features
 
             selected_cols, selected_train_corr = select_features_train_only(
@@ -1268,24 +1417,48 @@ def build_forecast_experiment(
                             }
                         )
 
-                    latest_feature_idx = x_source[selected_cols].dropna(how="all").index.max()
-                    latest_x = x_source.loc[[latest_feature_idx], selected_cols]
-                    latest_pred = float(pipe.predict(latest_x)[0])
+                    # Latest forecast 1: common origin, comparable to baselines.
+                    if common_origin is not None and common_origin in x_source.index:
+                        common_x = x_source.loc[[common_origin], selected_cols]
+                        if not common_x.isna().all(axis=1).iloc[0]:
+                            common_pred = float(pipe.predict(common_x)[0])
+                            latest_forecast_rows.append(
+                                {
+                                    "forecast_origin_type": "common_origin",
+                                    "forecast_origin": common_origin,
+                                    "forecast_target_date": common_origin + pd.DateOffset(months=horizon),
+                                    "horizon": horizon,
+                                    "model": display_model_name,
+                                    "feature_set": feature_set_name,
+                                    "forecast_truckd11_yoy": common_pred,
+                                    "n_features": len(selected_cols),
+                                    "nonzero_features": nonzero,
+                                    "alpha": alpha,
+                                    "l1_ratio": l1_ratio,
+                                }
+                            )
 
-                    latest_forecast_rows.append(
-                        {
-                            "forecast_origin": latest_feature_idx,
-                            "forecast_target_date": latest_feature_idx + pd.DateOffset(months=horizon),
-                            "horizon": horizon,
-                            "model": display_model_name,
-                            "feature_set": feature_set_name,
-                            "forecast_truckd11_yoy": latest_pred,
-                            "n_features": len(selected_cols),
-                            "nonzero_features": nonzero,
-                            "alpha": alpha,
-                            "l1_ratio": l1_ratio,
-                        }
-                    )
+                    # Latest forecast 2: feature origin, useful for nowcast if indicators are newer than target.
+                    feature_origin = x_source[selected_cols].dropna(how="all").index.max()
+                    if feature_origin is not None and feature_origin != common_origin:
+                        latest_x = x_source.loc[[feature_origin], selected_cols]
+                        latest_pred = float(pipe.predict(latest_x)[0])
+
+                        latest_forecast_rows.append(
+                            {
+                                "forecast_origin_type": "feature_origin",
+                                "forecast_origin": feature_origin,
+                                "forecast_target_date": feature_origin + pd.DateOffset(months=horizon),
+                                "horizon": horizon,
+                                "model": display_model_name,
+                                "feature_set": feature_set_name,
+                                "forecast_truckd11_yoy": latest_pred,
+                                "n_features": len(selected_cols),
+                                "nonzero_features": nonzero,
+                                "alpha": alpha,
+                                "l1_ratio": l1_ratio,
+                            }
+                        )
 
                 except Exception as exc:
                     print(f"Model failed: horizon={horizon}, model={display_model_name}, error={exc}", flush=True)
@@ -1316,7 +1489,10 @@ def build_forecast_experiment(
         model_comparison = model_comparison.sort_values(sort_cols)
 
     if not latest_forecast.empty:
-        latest_forecast = latest_forecast.sort_values(["horizon", "feature_set", "model"])
+        latest_forecast = latest_forecast.sort_values(["forecast_origin_type", "horizon", "feature_set", "model"])
+
+    best_model_summary = build_best_model_summary(model_comparison)
+    incremental_value = build_incremental_value_test(model_comparison)
 
     return {
         "model_comparison": model_comparison,
@@ -1324,6 +1500,8 @@ def build_forecast_experiment(
         "predictions": predictions,
         "latest_forecast": latest_forecast,
         "train_corr": train_corr,
+        "best_model_summary": best_model_summary,
+        "incremental_value": incremental_value,
     }
 
 
@@ -1351,6 +1529,7 @@ def write_outputs(
             {"item": "model selection rule", "value": "Train-only Pearson screen; best lag per base series; top max_model_features"},
             {"item": "models", "value": "Baselines plus Ridge/Lasso/ElasticNet for IndicatorsOnly, AROnly, and ARPlusIndicators"},
             {"item": "metrics", "value": "R2, MAE, MSE, RMSE, bias, directional accuracy"},
+            {"item": "new tabs", "value": "Best Model by Horizon and Incremental Value Test summarize whether indicators improve AROnly."},
             {"item": "caution", "value": "This is a statistical forecast test. Validate with out-of-sample metrics before using operationally."},
         ]
     )
@@ -1363,6 +1542,8 @@ def write_outputs(
 
         forecast_outputs["train_corr"].to_excel(writer, sheet_name="Correlation Train Only", index=False)
         forecast_outputs["model_comparison"].to_excel(writer, sheet_name="Model Comparison", index=False)
+        forecast_outputs["best_model_summary"].to_excel(writer, sheet_name="Best Model by Horizon", index=False)
+        forecast_outputs["incremental_value"].to_excel(writer, sheet_name="Incremental Value Test", index=False)
         forecast_outputs["selected_features"].to_excel(writer, sheet_name="Selected Features", index=False)
         forecast_outputs["latest_forecast"].to_excel(writer, sheet_name="Latest Forecast", index=False)
         forecast_outputs["predictions"].to_excel(writer, sheet_name="Predictions", index=False)
@@ -1453,6 +1634,16 @@ def main() -> None:
     if not model_comp.empty:
         cols = [c for c in ["horizon", "sample", "model", "r2", "mae", "rmse", "directional_accuracy", "n_features", "nonzero_features"] if c in model_comp.columns]
         print(model_comp[cols].head(40).to_string(index=False), flush=True)
+
+    print("\nBest model by horizon:", flush=True)
+    best = forecast_outputs.get("best_model_summary", pd.DataFrame())
+    if not best.empty:
+        print(best.to_string(index=False), flush=True)
+
+    print("\nIncremental value test:", flush=True)
+    inc = forecast_outputs.get("incremental_value", pd.DataFrame())
+    if not inc.empty:
+        print(inc.to_string(index=False), flush=True)
 
     print("\nLatest forecasts:", flush=True)
     latest = forecast_outputs["latest_forecast"]

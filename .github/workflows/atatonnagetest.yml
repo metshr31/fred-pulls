@@ -24,7 +24,15 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy requests scikit-learn openpyxl fredapi
+          pip install pandas numpy requests scikit-learn openpyxl
+
+      - name: Restore FRED download cache
+        uses: actions/cache@v4
+        with:
+          path: fred_download_cache
+          key: fred-download-cache-v1-${{ github.run_id }}
+          restore-keys: |
+            fred-download-cache-v1-
 
       - name: Confirm FRED_API_KEY is present
         run: |
@@ -35,9 +43,13 @@ jobs:
           print("FRED_API_KEY is available.")
           PY
 
+      - name: Confirm script has max-series option
+        run: |
+          python atatonnagetest.py --help
+
       - name: Run ATA Truck Tonnage feature screen
         run: |
-          python atatonnagetest.py --ridge-max-features 150
+          python atatonnagetest.py --max-series 75 --ridge-max-features 75
 
       - name: Upload Excel output
         if: always()
@@ -47,7 +59,7 @@ jobs:
           path: ata_truck_tonnage_feature_screen.xlsx
           if-no-files-found: warn
 
-      - name: Upload FRED cache
+      - name: Upload FRED cache artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:

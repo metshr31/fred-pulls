@@ -226,6 +226,11 @@ def fred_get_json(endpoint: str, **params) -> dict:
                 time.sleep(wait_seconds)
                 continue
 
+            # 400/404 usually means an invalid or unavailable series ID.
+            # Retrying these wastes minutes and causes GitHub timeouts.
+            if response.status_code in (400, 404):
+                response.raise_for_status()
+
             response.raise_for_status()
             time.sleep(REQUEST_SLEEP_SECONDS)
             return response.json()
@@ -233,6 +238,10 @@ def fred_get_json(endpoint: str, **params) -> dict:
         except Exception as exc:
             last_error = exc
             msg = str(exc).lower()
+
+            # Invalid/unavailable series IDs return 400/404. Do not retry them.
+            if "400 client error" in msg or "404 client error" in msg:
+                raise
 
             if "too many requests" in msg or "rate limit" in msg or "429" in msg:
                 wait_seconds = min(120, 10 * (attempt + 1))
@@ -253,7 +262,7 @@ def get_series_info(series_id: str) -> Optional[dict]:
         rows = data.get("seriess", [])
         return rows[0] if rows else None
     except Exception as exc:
-        print(f"Metadata unavailable for {series_id}: {exc}")
+        print(f"Metadata unavailable for {series_id}; skipping seed. Reason: {exc}")
         return None
 
 

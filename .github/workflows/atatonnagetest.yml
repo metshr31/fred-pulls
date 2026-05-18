@@ -30,8 +30,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: fred_download_cache
-          key: fred-download-cache-forecast-v1-${{ github.run_id }}
+          key: fred-download-cache-forecast-v2-${{ github.run_id }}
           restore-keys: |
+            fred-download-cache-forecast-v2-
             fred-download-cache-forecast-v1-
             fred-download-cache-v3-
             fred-download-cache-v2-
@@ -49,7 +50,7 @@ jobs:
         run: |
           python atatonnagetest.py --help
 
-      - name: Run ATA Truck Tonnage forecast model
+      - name: Run ATA Truck Tonnage AR plus indicators forecast model
         run: |
           python atatonnagetest.py --max-series 75 --max-model-features 15
 

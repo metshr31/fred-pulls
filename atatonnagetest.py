@@ -1,3 +1,27 @@
+#!/usr/bin/env python3
+"""
+ATA Truck Tonnage Predictive Feature Screen
+Target: TRUCKD11
+
+GitHub-safe version:
+- Reads FRED_API_KEY from GitHub Secrets / environment variable.
+- Does not hard-code the API key.
+- Uses a smaller first-test ridge feature cap by default: RIDGE_MAX_FEATURES = 150.
+- Uses TimeSeriesSplit for RidgeCV.
+- Writes an Excel workbook artifact.
+
+Install:
+    pip install pandas numpy requests scikit-learn openpyxl fredapi
+
+Run locally:
+    python atatonnagetest.py
+
+GitHub Actions:
+    Add FRED_API_KEY as a repository secret.
+"""
+
+from __future__ import annotations
+
 import argparse
 import os
 import re
@@ -50,9 +74,8 @@ RIDGE_MAX_FEATURES = 150
 OUTPUT_XLSX = "ata_truck_tonnage_feature_screen.xlsx"
 OUTPUT_DATA_DIR = Path("fred_download_cache")
 
-REQUEST_SLEEP_SECONDS = 0.50
-REQUEST_RETRIES = 8
-FRED_DOWNLOAD_SLEEP_SECONDS = 1.25
+REQUEST_SLEEP_SECONDS = 0.10
+REQUEST_RETRIES = 4
 
 
 # =============================================================================
@@ -479,65 +502,15 @@ def build_candidate_inventory() -> Tuple[pd.DataFrame, pd.DataFrame]:
 # =============================================================================
 
 def download_one_series(series_id: str) -> pd.Series:
-    """
-    Download one FRED series with explicit 429/rate-limit backoff.
+    series = fred.get_series(series_id)
 
-    Do NOT use fred.get_series() here. fredapi is convenient, but it does not
-    expose enough retry/backoff control for this broad 300-series batch pull.
-    """
-    last_error = None
+    if series is None or len(series) == 0:
+        return pd.Series(dtype=float, name=series_id)
 
-    for attempt in range(REQUEST_RETRIES):
-        try:
-            data = fred_get_json("series/observations", series_id=series_id)
-            observations = data.get("observations", [])
-
-            rows = []
-            for obs in observations:
-                value = obs.get("value")
-
-                if value in (None, "", ".", "#N/A"):
-                    numeric_value = np.nan
-                else:
-                    try:
-                        numeric_value = float(value)
-                    except Exception:
-                        numeric_value = np.nan
-
-                rows.append((pd.to_datetime(obs["date"]), numeric_value))
-
-            if not rows:
-                return pd.Series(dtype=float, name=series_id)
-
-            series = pd.Series(
-                data=[value for _, value in rows],
-                index=pd.DatetimeIndex([date for date, _ in rows], name="date"),
-                name=series_id,
-                dtype=float,
-            )
-
-            return series.sort_index()
-
-        except Exception as exc:
-            last_error = exc
-            msg = str(exc).lower()
-
-            if "too many requests" in msg or "rate limit" in msg or "429" in msg:
-                wait_seconds = min(120, 10 * (attempt + 1))
-                print(
-                    f"  Rate limited on {series_id}; waiting {wait_seconds}s "
-                    f"before retry {attempt + 1}/{REQUEST_RETRIES}"
-                )
-                time.sleep(wait_seconds)
-            else:
-                wait_seconds = min(60, 3 * (attempt + 1))
-                print(
-                    f"  Error on {series_id}: {exc}; waiting {wait_seconds}s "
-                    f"before retry {attempt + 1}/{REQUEST_RETRIES}"
-                )
-                time.sleep(wait_seconds)
-
-    raise RuntimeError(f"Failed downloading {series_id} after retries: {last_error}")
+    series.name = series_id
+    series.index = pd.to_datetime(series.index)
+    series = pd.to_numeric(series, errors="coerce")
+    return series.sort_index()
 
 
 def download_series_matrix(inventory: pd.DataFrame, cache_dir: Path) -> pd.DataFrame:
@@ -570,9 +543,6 @@ def download_series_matrix(inventory: pd.DataFrame, cache_dir: Path) -> pd.DataF
 
         except Exception as exc:
             print(f"WARNING: failed downloading {series_id}: {exc}")
-
-        # Be polite to FRED. This is what prevents the 291/300 rate-limit failure.
-        time.sleep(FRED_DOWNLOAD_SLEEP_SECONDS)
 
     if not all_series:
         raise RuntimeError("No series downloaded.")

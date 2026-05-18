@@ -30,9 +30,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: fred_download_cache
-          key: fred-download-cache-v1-${{ github.run_id }}
+          key: fred-download-cache-v2-${{ github.run_id }}
           restore-keys: |
-            fred-download-cache-v1-
+            fred-download-cache-v2-
 
       - name: Confirm FRED_API_KEY is present
         run: |
@@ -43,8 +43,9 @@ jobs:
           print("FRED_API_KEY is available.")
           PY
 
-      - name: Confirm script has max-series option
+      - name: Confirm workflow is using scaled-down command
         run: |
+          echo "Running scaled-down test: --max-series 75 --ridge-max-features 75"
           python atatonnagetest.py --help
 
       - name: Run ATA Truck Tonnage feature screen

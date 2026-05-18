@@ -30,8 +30,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: fred_download_cache
-          key: fred-download-cache-v2-${{ github.run_id }}
+          key: fred-download-cache-v3-${{ github.run_id }}
           restore-keys: |
+            fred-download-cache-v3-
             fred-download-cache-v2-
 
       - name: Confirm FRED_API_KEY is present

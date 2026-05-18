@@ -47,7 +47,7 @@ jobs:
 
       - name: Run TRUCKD11 forecast and context model
         run: |
-          python scripts/atatonnagetest_with_context.py \
+          python atatonnagetest_with_context.py \
             --output ata_truck_tonnage_forecast_model_with_context.xlsx \
             --cache-dir fred_download_cache \
             --max-series "${{ github.event.inputs.max_series || '75' }}" \

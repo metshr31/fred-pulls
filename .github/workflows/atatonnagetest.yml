@@ -30,8 +30,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: fred_download_cache
-          key: fred-download-cache-forecast-v3-${{ github.run_id }}
+          key: fred-download-cache-forecast-v4-${{ github.run_id }}
           restore-keys: |
+            fred-download-cache-forecast-v4-
             fred-download-cache-forecast-v3-
             fred-download-cache-forecast-v2-
             fred-download-cache-forecast-v1-
@@ -51,9 +52,9 @@ jobs:
         run: |
           python atatonnagetest.py --help
 
-      - name: Run ATA Truck Tonnage forecast model
+      - name: Run ATA Truck Tonnage forecast model with walk-forward backtest
         run: |
-          python atatonnagetest.py --max-series 75 --max-model-features 15
+          python atatonnagetest.py --max-series 75 --max-model-features 15 --walk-forward-step 3 --min-train-months 120
 
       - name: Upload forecast workbook
         if: always()

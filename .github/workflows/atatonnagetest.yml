@@ -51,7 +51,7 @@ jobs:
 
       - name: Run ATA Truck Tonnage forecast model
         run: |
-          python atatonnagetest.py --max-series 75 --max-model-features 75
+          python atatonnagetest.py --max-series 75 --max-model-features 15
 
       - name: Upload forecast workbook
         if: always()

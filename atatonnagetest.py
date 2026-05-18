@@ -803,6 +803,50 @@ def make_lagged_feature_matrix(yoy: pd.DataFrame, candidate_ids: list[str]) -> T
     return x_matrix, feature_map
 
 
+def make_ar_feature_matrix(yoy: pd.DataFrame, mom: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Build autoregressive TRUCKD11 features available at forecast origin t.
+
+    These features test whether outside indicators add value beyond TRUCKD11's
+    own momentum. For forecast horizon h, the target is TRUCKD11_YOY[t+h],
+    while these features use only information at t or earlier.
+    """
+    parts = []
+    rows = []
+
+    target_yoy = yoy[TARGET_SERIES]
+    target_mom = mom[TARGET_SERIES]
+
+    yoy_lags = [0, 1, 2, 3, 6, 9, 12]
+    mom_lags = [0, 1, 2, 3, 6]
+    rolling_windows = [3, 6, 12]
+
+    for lag in yoy_lags:
+        col = f"{TARGET_SERIES}_AR_YOY_lag{lag}"
+        parts.append(target_yoy.shift(lag).rename(col))
+        rows.append({"model_feature": col, "feature": col, "lag": lag, "feature_set": "AR"})
+
+    for lag in mom_lags:
+        col = f"{TARGET_SERIES}_AR_MOM_lag{lag}"
+        parts.append(target_mom.shift(lag).rename(col))
+        rows.append({"model_feature": col, "feature": col, "lag": lag, "feature_set": "AR"})
+
+    for window in rolling_windows:
+        col = f"{TARGET_SERIES}_AR_YOY_roll{window}"
+        parts.append(target_yoy.rolling(window).mean().rename(col))
+        rows.append({"model_feature": col, "feature": col, "lag": 0, "feature_set": "AR"})
+
+    for window in rolling_windows:
+        col = f"{TARGET_SERIES}_AR_MOM_roll{window}"
+        parts.append(target_mom.rolling(window).mean().rename(col))
+        rows.append({"model_feature": col, "feature": col, "lag": 0, "feature_set": "AR"})
+
+    x_matrix = pd.concat(parts, axis=1) if parts else pd.DataFrame(index=yoy.index)
+    feature_map = pd.DataFrame(rows, columns=["model_feature", "feature", "lag", "feature_set"])
+    return x_matrix, feature_map
+
+
+
 def select_features_train_only(
     x_train_all: pd.DataFrame,
     y_train: pd.Series,
@@ -974,11 +1018,37 @@ def model_coefficients(pipe, columns: list[str]) -> pd.Series:
 
 def build_forecast_experiment(
     yoy: pd.DataFrame,
+    mom: pd.DataFrame,
     inventory: pd.DataFrame,
     max_model_features: int,
 ) -> dict[str, pd.DataFrame]:
+    """
+    Forecast experiment with four kinds of model evidence:
+
+    1. Baselines: target persistence / rolling averages.
+    2. IndicatorsOnly: outside industrial, capacity, retail/freight indicators.
+    3. AROnly: TRUCKD11's own YoY/MoM lags and rolling averages.
+    4. ARPlusIndicators: TRUCKD11 momentum plus selected outside indicators.
+
+    This tells us whether industrial indicators add incremental value beyond
+    the target's own momentum.
+    """
     candidate_ids = [c for c in yoy.columns if c != TARGET_SERIES]
-    x_all, feature_map = make_lagged_feature_matrix(yoy, candidate_ids)
+
+    x_ind, feature_map_ind = make_lagged_feature_matrix(yoy, candidate_ids)
+    feature_map_ind["feature_set"] = "IndicatorsOnly"
+
+    x_ar, feature_map_ar = make_ar_feature_matrix(yoy, mom)
+
+    x_combo = pd.concat([x_ar, x_ind], axis=1, sort=True)
+    feature_map_combo = pd.concat([feature_map_ar, feature_map_ind], ignore_index=True, sort=False)
+    feature_map_combo["feature_set"] = feature_map_combo["feature_set"].fillna("ARPlusIndicators")
+
+    feature_sets = {
+        "IndicatorsOnly": (x_ind, feature_map_ind),
+        "AROnly": (x_ar, feature_map_ar),
+        "ARPlusIndicators": (x_combo, feature_map_combo),
+    }
 
     target_yoy_now = yoy[TARGET_SERIES]
 
@@ -995,50 +1065,35 @@ def build_forecast_experiment(
 
         y_future = target_yoy_now.shift(-horizon).rename(f"{TARGET_SERIES}_YOY_h{horizon}")
 
-        supervised = pd.concat([y_future, target_yoy_now.rename("target_yoy_now"), x_all], axis=1)
-        supervised = supervised.dropna(subset=[y_future.name])
+        # Baselines are known at time t and forecast t+h.
+        baseline_frame = pd.concat(
+            [
+                y_future,
+                target_yoy_now.rename("target_yoy_now"),
+                target_yoy_now.rolling(3).mean().rename("target_yoy_roll3"),
+                target_yoy_now.rolling(12).mean().rename("target_yoy_roll12"),
+            ],
+            axis=1,
+        ).dropna(subset=[y_future.name])
 
-        if len(supervised) < 90:
-            print(f"Skipping horizon {horizon}: insufficient rows ({len(supervised)})", flush=True)
+        if len(baseline_frame) < 90:
+            print(f"Skipping horizon {horizon}: insufficient rows ({len(baseline_frame)})", flush=True)
             continue
 
-        split_idx = int(len(supervised) * 0.80)
-        train_idx = supervised.index[:split_idx]
-        test_idx = supervised.index[split_idx:]
+        split_idx = int(len(baseline_frame) * 0.80)
+        train_idx = baseline_frame.index[:split_idx]
+        test_idx = baseline_frame.index[split_idx:]
 
-        y_train = supervised.loc[train_idx, y_future.name]
-        y_test = supervised.loc[test_idx, y_future.name]
-
-        x_train_all = supervised.loc[train_idx, x_all.columns]
-        x_test_all = supervised.loc[test_idx, x_all.columns]
-
-        selected_cols, selected_train_corr = select_features_train_only(
-            x_train_all=x_train_all,
-            y_train=y_train,
-            feature_map=feature_map,
-            max_features=max_model_features,
-        )
-
-        if selected_train_corr.empty or not selected_cols:
-            print(f"Skipping ML models for horizon {horizon}: no selected features", flush=True)
-            continue
-
-        selected_train_corr["horizon"] = horizon
-        train_corr_rows.extend(selected_train_corr.to_dict("records"))
-
-        x_train = x_train_all[selected_cols]
-        x_test = x_test_all[selected_cols]
-
-        # Baselines known at time t.
-        baseline_last_all = supervised["target_yoy_now"]
-        baseline_3m_all = target_yoy_now.rolling(3).mean().reindex(supervised.index)
-        baseline_12m_all = target_yoy_now.rolling(12).mean().reindex(supervised.index)
+        y_train = baseline_frame.loc[train_idx, y_future.name]
+        y_test = baseline_frame.loc[test_idx, y_future.name]
 
         baselines = {
-            "Baseline_LastKnownYoY": baseline_last_all,
-            "Baseline_Rolling3M": baseline_3m_all,
-            "Baseline_Rolling12M": baseline_12m_all,
+            "Baseline_LastKnownYoY": baseline_frame["target_yoy_now"],
+            "Baseline_Rolling3M": baseline_frame["target_yoy_roll3"],
+            "Baseline_Rolling12M": baseline_frame["target_yoy_roll12"],
         }
+
+        latest_origin = target_yoy_now.dropna().index.max()
 
         for baseline_name, pred_all in baselines.items():
             train_pred = pred_all.loc[train_idx]
@@ -1048,11 +1103,13 @@ def build_forecast_experiment(
                 y_train, train_pred, baseline_name, horizon, 0, 0
             )
             train_metrics["sample"] = "train"
+            train_metrics["feature_set"] = "Baseline"
 
             test_metrics = evaluate_predictions(
                 y_test, test_pred, baseline_name, horizon, 0, 0
             )
             test_metrics["sample"] = "test"
+            test_metrics["feature_set"] = "Baseline"
 
             model_comparison_rows.extend([train_metrics, test_metrics])
 
@@ -1066,126 +1123,181 @@ def build_forecast_experiment(
                         "date": dt,
                         "horizon": horizon,
                         "model": baseline_name,
+                        "feature_set": "Baseline",
                         "actual": row["actual"],
                         "predicted": row["predicted"],
                         "sample": "train" if dt in train_idx else ("test" if dt in test_idx else "other"),
                     }
                 )
 
-            latest_idx = supervised.index.max()
-            latest_forecast_rows.append(
-                {
-                    "forecast_origin": latest_idx,
-                    "forecast_target_date": latest_idx + pd.DateOffset(months=horizon),
-                    "horizon": horizon,
-                    "model": baseline_name,
-                    "forecast_truckd11_yoy": pred_all.loc[latest_idx] if latest_idx in pred_all.index else np.nan,
-                    "n_features": 0,
-                    "nonzero_features": 0,
-                    "alpha": None,
-                    "l1_ratio": None,
-                }
-            )
-
-        for model_name in ["Ridge", "Lasso", "ElasticNet"]:
-            try:
-                pipe = fit_linear_model(model_name, x_train, y_train)
-                train_pred = pd.Series(pipe.predict(x_train), index=x_train.index)
-                test_pred = pd.Series(pipe.predict(x_test), index=x_test.index)
-
-                coefs = model_coefficients(pipe, selected_cols)
-                nonzero = int((coefs.abs() > 1e-10).sum())
-
-                alpha = model_alpha(pipe)
-                l1_ratio = model_l1_ratio(pipe)
-
-                train_metrics = evaluate_predictions(
-                    y_train, train_pred, model_name, horizon, len(selected_cols), nonzero, alpha, l1_ratio
-                )
-                train_metrics["sample"] = "train"
-
-                test_metrics = evaluate_predictions(
-                    y_test, test_pred, model_name, horizon, len(selected_cols), nonzero, alpha, l1_ratio
-                )
-                test_metrics["sample"] = "test"
-
-                model_comparison_rows.extend([train_metrics, test_metrics])
-
-                for model_feature, coef in coefs.items():
-                    fm = feature_map.loc[feature_map["model_feature"] == model_feature]
-                    if fm.empty:
-                        continue
-
-                    base_feature = fm["feature"].iloc[0]
-                    lag = int(fm["lag"].iloc[0])
-                    meta = metadata.loc[base_feature] if base_feature in metadata.index else pd.Series(dtype=object)
-
-                    train_corr_row = selected_train_corr.loc[
-                        selected_train_corr["model_feature"] == model_feature
-                    ]
-                    train_pearson = (
-                        train_corr_row["train_pearson"].iloc[0]
-                        if not train_corr_row.empty else np.nan
-                    )
-
-                    selected_feature_rows.append(
-                        {
-                            "horizon": horizon,
-                            "model": model_name,
-                            "model_feature": model_feature,
-                            "feature": base_feature,
-                            "series_name": meta.get("title", ""),
-                            "category": meta.get("category", ""),
-                            "naics": meta.get("naics", ""),
-                            "lag": lag,
-                            "train_pearson": train_pearson,
-                            "coefficient": float(coef),
-                            "abs_coefficient": float(abs(coef)),
-                            "nonzero": bool(abs(coef) > 1e-10),
-                        }
-                    )
-
-                combined_pred = pd.concat([train_pred, test_pred]).sort_index()
-                for dt, pred in combined_pred.items():
-                    prediction_rows.append(
-                        {
-                            "date": dt,
-                            "horizon": horizon,
-                            "model": model_name,
-                            "actual": y_future.loc[dt] if dt in y_future.index else np.nan,
-                            "predicted": pred,
-                            "sample": "train" if dt in train_idx else ("test" if dt in test_idx else "other"),
-                        }
-                    )
-
-                latest_idx = supervised.index.max()
-                latest_x = supervised.loc[[latest_idx], selected_cols]
-                latest_pred = float(pipe.predict(latest_x)[0])
+            if latest_origin is not None and latest_origin in target_yoy_now.index:
+                if baseline_name == "Baseline_LastKnownYoY":
+                    latest_pred = target_yoy_now.loc[latest_origin]
+                elif baseline_name == "Baseline_Rolling3M":
+                    latest_pred = target_yoy_now.rolling(3).mean().loc[latest_origin]
+                else:
+                    latest_pred = target_yoy_now.rolling(12).mean().loc[latest_origin]
 
                 latest_forecast_rows.append(
                     {
-                        "forecast_origin": latest_idx,
-                        "forecast_target_date": latest_idx + pd.DateOffset(months=horizon),
+                        "forecast_origin": latest_origin,
+                        "forecast_target_date": latest_origin + pd.DateOffset(months=horizon),
                         "horizon": horizon,
-                        "model": model_name,
+                        "model": baseline_name,
+                        "feature_set": "Baseline",
                         "forecast_truckd11_yoy": latest_pred,
-                        "n_features": len(selected_cols),
-                        "nonzero_features": nonzero,
-                        "alpha": alpha,
-                        "l1_ratio": l1_ratio,
+                        "n_features": 0,
+                        "nonzero_features": 0,
+                        "alpha": None,
+                        "l1_ratio": None,
                     }
                 )
 
-            except Exception as exc:
-                print(f"Model failed: horizon={horizon}, model={model_name}, error={exc}", flush=True)
-                model_comparison_rows.append(
-                    {
-                        "horizon": horizon,
-                        "model": model_name,
-                        "sample": "error",
-                        "error": str(exc),
-                    }
-                )
+        for feature_set_name, (x_source, fmap_source) in feature_sets.items():
+            supervised = pd.concat([y_future, x_source], axis=1).dropna(subset=[y_future.name])
+
+            if len(supervised) < 90:
+                print(f"Skipping {feature_set_name}, horizon {horizon}: insufficient rows", flush=True)
+                continue
+
+            split_idx = int(len(supervised) * 0.80)
+            train_idx = supervised.index[:split_idx]
+            test_idx = supervised.index[split_idx:]
+
+            y_train = supervised.loc[train_idx, y_future.name]
+            y_test = supervised.loc[test_idx, y_future.name]
+
+            x_train_all = supervised.loc[train_idx, x_source.columns]
+            x_test_all = supervised.loc[test_idx, x_source.columns]
+
+            # Keep AR-only feature count modest but not over-restrictive.
+            feature_cap = min(max_model_features, 20) if feature_set_name == "AROnly" else max_model_features
+
+            selected_cols, selected_train_corr = select_features_train_only(
+                x_train_all=x_train_all,
+                y_train=y_train,
+                feature_map=fmap_source,
+                max_features=feature_cap,
+            )
+
+            if selected_train_corr.empty or not selected_cols:
+                print(f"Skipping ML models for horizon {horizon}, {feature_set_name}: no selected features", flush=True)
+                continue
+
+            selected_train_corr["horizon"] = horizon
+            selected_train_corr["feature_set"] = feature_set_name
+            train_corr_rows.extend(selected_train_corr.to_dict("records"))
+
+            x_train = x_train_all[selected_cols]
+            x_test = x_test_all[selected_cols]
+
+            for model_name in ["Ridge", "Lasso", "ElasticNet"]:
+                display_model_name = f"{model_name}_{feature_set_name}"
+
+                try:
+                    pipe = fit_linear_model(model_name, x_train, y_train)
+                    train_pred = pd.Series(pipe.predict(x_train), index=x_train.index)
+                    test_pred = pd.Series(pipe.predict(x_test), index=x_test.index)
+
+                    coefs = model_coefficients(pipe, selected_cols)
+                    nonzero = int((coefs.abs() > 1e-10).sum())
+
+                    alpha = model_alpha(pipe)
+                    l1_ratio = model_l1_ratio(pipe)
+
+                    train_metrics = evaluate_predictions(
+                        y_train, train_pred, display_model_name, horizon, len(selected_cols), nonzero, alpha, l1_ratio
+                    )
+                    train_metrics["sample"] = "train"
+                    train_metrics["feature_set"] = feature_set_name
+
+                    test_metrics = evaluate_predictions(
+                        y_test, test_pred, display_model_name, horizon, len(selected_cols), nonzero, alpha, l1_ratio
+                    )
+                    test_metrics["sample"] = "test"
+                    test_metrics["feature_set"] = feature_set_name
+
+                    model_comparison_rows.extend([train_metrics, test_metrics])
+
+                    for model_feature, coef in coefs.items():
+                        fm = fmap_source.loc[fmap_source["model_feature"] == model_feature]
+                        if fm.empty:
+                            continue
+
+                        base_feature = fm["feature"].iloc[0]
+                        lag = int(fm["lag"].iloc[0])
+                        meta = metadata.loc[base_feature] if base_feature in metadata.index else pd.Series(dtype=object)
+
+                        train_corr_row = selected_train_corr.loc[
+                            selected_train_corr["model_feature"] == model_feature
+                        ]
+                        train_pearson = (
+                            train_corr_row["train_pearson"].iloc[0]
+                            if not train_corr_row.empty else np.nan
+                        )
+
+                        selected_feature_rows.append(
+                            {
+                                "horizon": horizon,
+                                "model": display_model_name,
+                                "feature_set": feature_set_name,
+                                "model_feature": model_feature,
+                                "feature": base_feature,
+                                "series_name": meta.get("title", base_feature),
+                                "category": meta.get("category", "AR" if feature_set_name != "IndicatorsOnly" else ""),
+                                "naics": meta.get("naics", ""),
+                                "lag": lag,
+                                "train_pearson": train_pearson,
+                                "coefficient": float(coef),
+                                "abs_coefficient": float(abs(coef)),
+                                "nonzero": bool(abs(coef) > 1e-10),
+                            }
+                        )
+
+                    combined_pred = pd.concat([train_pred, test_pred]).sort_index()
+                    for dt, pred in combined_pred.items():
+                        prediction_rows.append(
+                            {
+                                "date": dt,
+                                "horizon": horizon,
+                                "model": display_model_name,
+                                "feature_set": feature_set_name,
+                                "actual": y_future.loc[dt] if dt in y_future.index else np.nan,
+                                "predicted": pred,
+                                "sample": "train" if dt in train_idx else ("test" if dt in test_idx else "other"),
+                            }
+                        )
+
+                    latest_feature_idx = x_source[selected_cols].dropna(how="all").index.max()
+                    latest_x = x_source.loc[[latest_feature_idx], selected_cols]
+                    latest_pred = float(pipe.predict(latest_x)[0])
+
+                    latest_forecast_rows.append(
+                        {
+                            "forecast_origin": latest_feature_idx,
+                            "forecast_target_date": latest_feature_idx + pd.DateOffset(months=horizon),
+                            "horizon": horizon,
+                            "model": display_model_name,
+                            "feature_set": feature_set_name,
+                            "forecast_truckd11_yoy": latest_pred,
+                            "n_features": len(selected_cols),
+                            "nonzero_features": nonzero,
+                            "alpha": alpha,
+                            "l1_ratio": l1_ratio,
+                        }
+                    )
+
+                except Exception as exc:
+                    print(f"Model failed: horizon={horizon}, model={display_model_name}, error={exc}", flush=True)
+                    model_comparison_rows.append(
+                        {
+                            "horizon": horizon,
+                            "model": display_model_name,
+                            "feature_set": feature_set_name,
+                            "sample": "error",
+                            "error": str(exc),
+                        }
+                    )
 
     model_comparison = pd.DataFrame(model_comparison_rows)
     selected_features = pd.DataFrame(selected_feature_rows)
@@ -1200,10 +1312,11 @@ def build_forecast_experiment(
         )
 
     if not model_comparison.empty:
-        model_comparison = model_comparison.sort_values(["horizon", "sample", "model"])
+        sort_cols = [c for c in ["horizon", "sample", "feature_set", "model"] if c in model_comparison.columns]
+        model_comparison = model_comparison.sort_values(sort_cols)
 
     if not latest_forecast.empty:
-        latest_forecast = latest_forecast.sort_values(["horizon", "model"])
+        latest_forecast = latest_forecast.sort_values(["horizon", "feature_set", "model"])
 
     return {
         "model_comparison": model_comparison,
@@ -1234,9 +1347,9 @@ def write_outputs(
             {"item": "forecast horizons", "value": ", ".join(map(str, FORECAST_HORIZONS))},
             {"item": "feature lags", "value": ", ".join(map(str, FEATURE_LAGS))},
             {"item": "target definition", "value": "TRUCKD11 YoY shifted forward by forecast horizon h"},
-            {"item": "feature definition", "value": "Candidate YoY values at t, t-1, t-2, t-3, t-6, t-9, t-12"},
+            {"item": "feature definition", "value": "Candidate YoY lags plus TRUCKD11 autoregressive YoY/MoM lags and rolling averages"},
             {"item": "model selection rule", "value": "Train-only Pearson screen; best lag per base series; top max_model_features"},
-            {"item": "models", "value": "Baseline_LastKnownYoY, Baseline_Rolling3M, Baseline_Rolling12M, Ridge, Lasso, ElasticNet"},
+            {"item": "models", "value": "Baselines plus Ridge/Lasso/ElasticNet for IndicatorsOnly, AROnly, and ARPlusIndicators"},
             {"item": "metrics", "value": "R2, MAE, MSE, RMSE, bias, directional accuracy"},
             {"item": "caution", "value": "This is a statistical forecast test. Validate with out-of-sample metrics before using operationally."},
         ]
@@ -1319,6 +1432,7 @@ def main() -> None:
     full_corr = build_full_correlation_screen(raw, yoy, mom, primary_inventory)
     forecast_outputs = build_forecast_experiment(
         yoy=yoy,
+        mom=mom,
         inventory=primary_inventory,
         max_model_features=args.max_model_features,
     )

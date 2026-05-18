@@ -63,6 +63,8 @@ MIN_MODEL_OBS = 72
 
 MAX_SERIES_FIRST_TEST = 75
 MAX_MODEL_FEATURES = 75
+DEFAULT_WALK_FORWARD_STEP = 3
+DEFAULT_MIN_TRAIN_MONTHS = 120
 
 OUTPUT_XLSX = "ata_truck_tonnage_forecast_model.xlsx"
 OUTPUT_DATA_DIR = Path("fred_download_cache")
@@ -1165,6 +1167,247 @@ def build_incremental_value_test(model_comparison: pd.DataFrame) -> pd.DataFrame
     return pd.DataFrame(rows).sort_values("horizon").reset_index(drop=True)
 
 
+def build_recommended_forecasts(
+    best_model_summary: pd.DataFrame,
+    latest_forecast: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Final clean forecast table using the best model by horizon.
+
+    Uses common_origin forecasts first so all models are anchored to the same
+    latest known TRUCKD11 month. This is the clean table for practical use.
+    """
+    if best_model_summary.empty or latest_forecast.empty:
+        return pd.DataFrame()
+
+    common = latest_forecast[latest_forecast["forecast_origin_type"] == "common_origin"].copy()
+    rows = []
+
+    for _, best in best_model_summary.iterrows():
+        horizon = int(best["horizon"])
+        model = best["best_model"]
+
+        match = common[
+            (common["horizon"] == horizon)
+            & (common["model"] == model)
+        ]
+
+        if match.empty:
+            continue
+
+        forecast = match.iloc[0]
+
+        rows.append(
+            {
+                "horizon": horizon,
+                "recommended_model": model,
+                "recommendation": best.get("recommendation", ""),
+                "indicator_incremental_value": best.get("indicator_incremental_value", ""),
+                "forecast_origin": forecast["forecast_origin"],
+                "forecast_target_date": forecast["forecast_target_date"],
+                "forecast_truckd11_yoy": forecast["forecast_truckd11_yoy"],
+                "test_r2": best.get("best_test_r2", np.nan),
+                "test_mae": best.get("best_test_mae", np.nan),
+                "test_rmse": best.get("best_test_rmse", np.nan),
+                "directional_accuracy": best.get("best_directional_accuracy", np.nan),
+                "rmse_improvement_vs_best_baseline": best.get("rmse_improvement_vs_best_baseline", np.nan),
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values("horizon").reset_index(drop=True)
+
+
+def evaluate_walk_forward_results(wf_predictions: pd.DataFrame) -> pd.DataFrame:
+    """
+    Summarize walk-forward predictions by horizon/model.
+    """
+    if wf_predictions.empty:
+        return pd.DataFrame()
+
+    rows = []
+
+    for (horizon, model, feature_set), group in wf_predictions.groupby(["horizon", "model", "feature_set"]):
+        aligned = group.dropna(subset=["actual", "predicted"]).copy()
+        if aligned.empty:
+            continue
+
+        errors = aligned["predicted"] - aligned["actual"]
+        mse = float(np.mean(errors ** 2))
+        rows.append(
+            {
+                "horizon": horizon,
+                "model": model,
+                "feature_set": feature_set,
+                "n_obs": len(aligned),
+                "r2": r2_score(aligned["actual"], aligned["predicted"]) if len(aligned) >= 2 else np.nan,
+                "mae": mean_absolute_error(aligned["actual"], aligned["predicted"]),
+                "mse": mse,
+                "rmse": float(np.sqrt(mse)),
+                "bias": float(errors.mean()),
+                "directional_accuracy": float((np.sign(aligned["actual"]) == np.sign(aligned["predicted"])).mean()),
+            }
+        )
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
+    return out.sort_values(["horizon", "rmse", "mae"], ascending=[True, True, True]).reset_index(drop=True)
+
+
+def build_walk_forward_backtest(
+    yoy: pd.DataFrame,
+    mom: pd.DataFrame,
+    max_model_features: int,
+    min_train_months: int = DEFAULT_MIN_TRAIN_MONTHS,
+    step: int = DEFAULT_WALK_FORWARD_STEP,
+) -> dict[str, pd.DataFrame]:
+    """
+    Expanding-window walk-forward test focused on the model family that has worked:
+    AROnly, plus simple baselines.
+
+    For each horizon:
+    - Train only on data available before the test row.
+    - Select AROnly features using train-only correlations.
+    - Fit Ridge/Lasso/ElasticNet.
+    - Predict one future observation.
+    - Step forward by `step` months.
+
+    This gives a more realistic out-of-sample test than one 80/20 split.
+    """
+    x_ar, feature_map_ar = make_ar_feature_matrix(yoy, mom)
+    target_yoy_now = yoy[TARGET_SERIES]
+
+    prediction_rows = []
+
+    for horizon in FORECAST_HORIZONS:
+        print(f"Running walk-forward backtest h={horizon}", flush=True)
+
+        y_future = target_yoy_now.shift(-horizon).rename(f"{TARGET_SERIES}_YOY_h{horizon}")
+
+        supervised = pd.concat(
+            [
+                y_future,
+                target_yoy_now.rename("target_yoy_now"),
+                target_yoy_now.rolling(3).mean().rename("target_yoy_roll3"),
+                target_yoy_now.rolling(12).mean().rename("target_yoy_roll12"),
+                x_ar,
+            ],
+            axis=1,
+        ).dropna(subset=[y_future.name])
+
+        if len(supervised) < min_train_months + 24:
+            print(f"Skipping walk-forward h={horizon}: insufficient rows ({len(supervised)})", flush=True)
+            continue
+
+        feature_cols = list(x_ar.columns)
+
+        for test_pos in range(min_train_months, len(supervised), step):
+            train = supervised.iloc[:test_pos].copy()
+            test = supervised.iloc[[test_pos]].copy()
+
+            test_date = test.index[0]
+
+            y_train = train[y_future.name]
+            y_test = float(test[y_future.name].iloc[0])
+
+            # Baselines
+            baseline_values = {
+                "Baseline_LastKnownYoY": test["target_yoy_now"].iloc[0],
+                "Baseline_Rolling3M": test["target_yoy_roll3"].iloc[0],
+                "Baseline_Rolling12M": test["target_yoy_roll12"].iloc[0],
+            }
+
+            for model_name, pred in baseline_values.items():
+                prediction_rows.append(
+                    {
+                        "date": test_date,
+                        "horizon": horizon,
+                        "model": model_name,
+                        "feature_set": "Baseline",
+                        "actual": y_test,
+                        "predicted": pred,
+                        "train_end": train.index.max(),
+                        "n_train": len(train),
+                    }
+                )
+
+            x_train_all = train[feature_cols]
+            selected_cols, selected_train_corr = select_features_train_only(
+                x_train_all=x_train_all,
+                y_train=y_train,
+                feature_map=feature_map_ar,
+                max_features=min(max_model_features, 20),
+            )
+
+            if not selected_cols:
+                continue
+
+            x_train = x_train_all[selected_cols]
+            x_test = test[selected_cols]
+
+            for base_model_name in ["Ridge", "Lasso", "ElasticNet"]:
+                display_model_name = f"{base_model_name}_AROnly"
+                try:
+                    pipe = fit_linear_model(base_model_name, x_train, y_train)
+                    pred = float(pipe.predict(x_test)[0])
+
+                    prediction_rows.append(
+                        {
+                            "date": test_date,
+                            "horizon": horizon,
+                            "model": display_model_name,
+                            "feature_set": "AROnly",
+                            "actual": y_test,
+                            "predicted": pred,
+                            "train_end": train.index.max(),
+                            "n_train": len(train),
+                            "n_features": len(selected_cols),
+                            "nonzero_features": int((model_coefficients(pipe, selected_cols).abs() > 1e-10).sum()),
+                            "alpha": model_alpha(pipe),
+                            "l1_ratio": model_l1_ratio(pipe),
+                        }
+                    )
+                except Exception as exc:
+                    print(f"Walk-forward model failed h={horizon}, date={test_date}, model={display_model_name}: {exc}", flush=True)
+
+    wf_predictions = pd.DataFrame(prediction_rows)
+    wf_summary = evaluate_walk_forward_results(wf_predictions)
+
+    return {
+        "walk_forward_predictions": wf_predictions,
+        "walk_forward_summary": wf_summary,
+    }
+
+
+def build_chart_data(predictions: pd.DataFrame, best_model_summary: pd.DataFrame) -> pd.DataFrame:
+    """
+    Creates a compact Actual-vs-Forecast chart data table for the recommended model
+    at each horizon using the regular 80/20 predictions.
+    """
+    if predictions.empty or best_model_summary.empty:
+        return pd.DataFrame()
+
+    pieces = []
+
+    for _, row in best_model_summary.iterrows():
+        horizon = int(row["horizon"])
+        model = row["best_model"]
+
+        subset = predictions[
+            (predictions["horizon"] == horizon)
+            & (predictions["model"] == model)
+        ][["date", "horizon", "model", "sample", "actual", "predicted"]].copy()
+
+        pieces.append(subset)
+
+    if not pieces:
+        return pd.DataFrame()
+
+    return pd.concat(pieces, ignore_index=True).sort_values(["horizon", "date"])
+
+
+
 def build_forecast_experiment(
     yoy: pd.DataFrame,
     mom: pd.DataFrame,
@@ -1493,6 +1736,8 @@ def build_forecast_experiment(
 
     best_model_summary = build_best_model_summary(model_comparison)
     incremental_value = build_incremental_value_test(model_comparison)
+    recommended_forecasts = build_recommended_forecasts(best_model_summary, latest_forecast)
+    chart_data = build_chart_data(predictions, best_model_summary)
 
     return {
         "model_comparison": model_comparison,
@@ -1502,6 +1747,8 @@ def build_forecast_experiment(
         "train_corr": train_corr,
         "best_model_summary": best_model_summary,
         "incremental_value": incremental_value,
+        "recommended_forecasts": recommended_forecasts,
+        "chart_data": chart_data,
     }
 
 
@@ -1518,6 +1765,7 @@ def write_outputs(
     mom: pd.DataFrame,
     full_corr: pd.DataFrame,
     forecast_outputs: dict[str, pd.DataFrame],
+    walk_forward_outputs: dict[str, pd.DataFrame],
 ) -> None:
     readme = pd.DataFrame(
         [
@@ -1529,7 +1777,7 @@ def write_outputs(
             {"item": "model selection rule", "value": "Train-only Pearson screen; best lag per base series; top max_model_features"},
             {"item": "models", "value": "Baselines plus Ridge/Lasso/ElasticNet for IndicatorsOnly, AROnly, and ARPlusIndicators"},
             {"item": "metrics", "value": "R2, MAE, MSE, RMSE, bias, directional accuracy"},
-            {"item": "new tabs", "value": "Best Model by Horizon and Incremental Value Test summarize whether indicators improve AROnly."},
+            {"item": "new tabs", "value": "Best Model by Horizon, Incremental Value Test, Recommended Forecasts, Walk Forward Summary, Walk Forward Predictions, and Forecast Chart Data."},
             {"item": "caution", "value": "This is a statistical forecast test. Validate with out-of-sample metrics before using operationally."},
         ]
     )
@@ -1544,9 +1792,14 @@ def write_outputs(
         forecast_outputs["model_comparison"].to_excel(writer, sheet_name="Model Comparison", index=False)
         forecast_outputs["best_model_summary"].to_excel(writer, sheet_name="Best Model by Horizon", index=False)
         forecast_outputs["incremental_value"].to_excel(writer, sheet_name="Incremental Value Test", index=False)
+        forecast_outputs["recommended_forecasts"].to_excel(writer, sheet_name="Recommended Forecasts", index=False)
         forecast_outputs["selected_features"].to_excel(writer, sheet_name="Selected Features", index=False)
         forecast_outputs["latest_forecast"].to_excel(writer, sheet_name="Latest Forecast", index=False)
+        forecast_outputs["chart_data"].to_excel(writer, sheet_name="Forecast Chart Data", index=False)
         forecast_outputs["predictions"].to_excel(writer, sheet_name="Predictions", index=False)
+
+        walk_forward_outputs["walk_forward_summary"].to_excel(writer, sheet_name="Walk Forward Summary", index=False)
+        walk_forward_outputs["walk_forward_predictions"].to_excel(writer, sheet_name="Walk Forward Predictions", index=False)
 
         raw.tail(240).to_excel(writer, sheet_name="Raw Last 20Y")
         yoy.tail(240).to_excel(writer, sheet_name="YoY Last 20Y")
@@ -1588,6 +1841,20 @@ def main() -> None:
         help="Maximum selected model features per horizon.",
     )
 
+    parser.add_argument(
+        "--walk-forward-step",
+        type=int,
+        default=DEFAULT_WALK_FORWARD_STEP,
+        help="Walk-forward test step size in months. Default is 3 for speed.",
+    )
+
+    parser.add_argument(
+        "--min-train-months",
+        type=int,
+        default=DEFAULT_MIN_TRAIN_MONTHS,
+        help="Minimum expanding-window training months for walk-forward backtest.",
+    )
+
     args = parser.parse_args()
 
     cache_dir = Path(args.cache_dir)
@@ -1618,6 +1885,14 @@ def main() -> None:
         max_model_features=args.max_model_features,
     )
 
+    walk_forward_outputs = build_walk_forward_backtest(
+        yoy=yoy,
+        mom=mom,
+        max_model_features=args.max_model_features,
+        min_train_months=args.min_train_months,
+        step=args.walk_forward_step,
+    )
+
     write_outputs(
         output_xlsx=args.output,
         primary_inventory=primary_inventory,
@@ -1627,6 +1902,7 @@ def main() -> None:
         mom=mom,
         full_corr=full_corr,
         forecast_outputs=forecast_outputs,
+        walk_forward_outputs=walk_forward_outputs,
     )
 
     print("\nTop model comparison rows:", flush=True)
@@ -1644,6 +1920,16 @@ def main() -> None:
     inc = forecast_outputs.get("incremental_value", pd.DataFrame())
     if not inc.empty:
         print(inc.to_string(index=False), flush=True)
+
+    print("\nRecommended forecasts:", flush=True)
+    rec = forecast_outputs.get("recommended_forecasts", pd.DataFrame())
+    if not rec.empty:
+        print(rec.to_string(index=False), flush=True)
+
+    print("\nWalk-forward summary:", flush=True)
+    wf = walk_forward_outputs.get("walk_forward_summary", pd.DataFrame())
+    if not wf.empty:
+        print(wf.to_string(index=False), flush=True)
 
     print("\nLatest forecasts:", flush=True)
     latest = forecast_outputs["latest_forecast"]

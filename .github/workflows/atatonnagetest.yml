@@ -1,10 +1,10 @@
-name: Run ATA Truck Tonnage Feature Screen
+name: Run ATA Truck Tonnage Forecast Model
 
 on:
   workflow_dispatch:
 
 jobs:
-  run-truck-tonnage-screen:
+  run-truck-tonnage-forecast:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -30,8 +30,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: fred_download_cache
-          key: fred-download-cache-v3-${{ github.run_id }}
+          key: fred-download-cache-forecast-v1-${{ github.run_id }}
           restore-keys: |
+            fred-download-cache-forecast-v1-
             fred-download-cache-v3-
             fred-download-cache-v2-
 
@@ -44,21 +45,20 @@ jobs:
           print("FRED_API_KEY is available.")
           PY
 
-      - name: Confirm workflow is using scaled-down command
+      - name: Confirm forecast script options
         run: |
-          echo "Running scaled-down test: --max-series 75 --ridge-max-features 75"
           python atatonnagetest.py --help
 
-      - name: Run ATA Truck Tonnage feature screen
+      - name: Run ATA Truck Tonnage forecast model
         run: |
-          python atatonnagetest.py --max-series 75 --ridge-max-features 75
+          python atatonnagetest.py --max-series 75 --max-model-features 75
 
-      - name: Upload Excel output
+      - name: Upload forecast workbook
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ata-truck-tonnage-feature-screen
-          path: ata_truck_tonnage_feature_screen.xlsx
+          name: ata-truck-tonnage-forecast-model
+          path: ata_truck_tonnage_forecast_model.xlsx
           if-no-files-found: warn
 
       - name: Upload FRED cache artifact
